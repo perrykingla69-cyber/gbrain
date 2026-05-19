@@ -19,11 +19,19 @@ start here.
 
 ## Install (5 min)
 
-1. Clone: `git clone https://github.com/garrytan/gbrain ~/gbrain && cd ~/gbrain`
-2. Install: `bun install`
-3. Init the brain: `gbrain init` (defaults to PGLite, zero-config). For 1000+ files or
+1. Install gbrain via Bun (the canonical path):
+   ```bash
+   curl -fsSL https://bun.sh/install | bash
+   export PATH="$HOME/.bun/bin:$PATH"
+   bun install -g github:garrytan/gbrain
+   ```
+   If `bun install -g` aborts or `gbrain doctor` reports `schema_version: 0`,
+   the CLI prints a recovery hint pointing at [#218](https://github.com/garrytan/gbrain/issues/218).
+   Run `gbrain apply-migrations --yes` to recover, or fall back to the
+   deterministic install: `git clone https://github.com/garrytan/gbrain.git ~/gbrain && cd ~/gbrain && bun install && bun link`.
+2. Init the brain: `gbrain init` (defaults to PGLite, zero-config). For 1000+ files or
    multi-machine sync, init suggests Postgres + pgvector via Supabase.
-4. **STOP — ask the user about search mode.** `gbrain init` auto-applied a
+3. **STOP — ask the user about search mode.** `gbrain init` auto-applied a
    default but printed a 9-cell cost matrix (mode × downstream model)
    preceded by `[AGENT]` markers. You MUST relay the matrix to the operator
    and confirm their choice before continuing. Cost spread between corners
@@ -31,7 +39,7 @@ start here.
    [`./INSTALL_FOR_AGENTS.md`](./INSTALL_FOR_AGENTS.md) Step 3.5 for the
    exact ask-the-user protocol. Same banner fires on `gbrain post-upgrade`
    for existing users (search modes were added in v0.32.3).
-5. Read [`./INSTALL_FOR_AGENTS.md`](./INSTALL_FOR_AGENTS.md) for the full 9-step flow
+4. Read [`./INSTALL_FOR_AGENTS.md`](./INSTALL_FOR_AGENTS.md) for the full 9-step flow
    (API keys, identity, cron, verification).
 
 ## Read this order
@@ -62,8 +70,9 @@ writing or reviewing an operation, consult `src/core/operations.ts` for the cont
   [`docs/mcp/DEPLOY.md`](./docs/mcp/DEPLOY.md).
 - **Debug:** [`docs/GBRAIN_VERIFY.md`](./docs/GBRAIN_VERIFY.md),
   [`docs/guides/minions-fix.md`](./docs/guides/minions-fix.md), `gbrain doctor --fix`.
-- **Migrate:** [`docs/UPGRADING_DOWNSTREAM_AGENTS.md`](./docs/UPGRADING_DOWNSTREAM_AGENTS.md),
-  [`skills/migrations/`](./skills/migrations/), `gbrain apply-migrations`.
+- **Migrate / upgrade:** `gbrain upgrade` (binary self-update + schema migrations + post-upgrade prompts),
+  [`docs/UPGRADING_DOWNSTREAM_AGENTS.md`](./docs/UPGRADING_DOWNSTREAM_AGENTS.md),
+  [`skills/migrations/`](./skills/migrations/), `gbrain apply-migrations --yes` (manual schema-only).
 - **Eval retrieval changes:** capture is off by default. To benchmark a
   retrieval change against real captured queries, set
   `GBRAIN_CONTRIBUTOR_MODE=1`, then `gbrain eval export --since 7d > base.ndjson`
@@ -72,6 +81,17 @@ writing or reviewing an operation, consult `src/core/operations.ts` for the cont
   <dataset.jsonl>` (v0.28.8) runs against an isolated in-memory PGLite
   per question — your `~/.gbrain` is never opened. Full guide:
   [`docs/eval-bench.md`](./docs/eval-bench.md).
+- **Drive the brain to a target health score (v0.36.4.0):** the one-command
+  loop. `gbrain doctor --remediation-plan --json` previews what would be
+  fixed; `gbrain doctor --remediate --yes --target-score 90 --max-usd 5`
+  walks a dependency-ordered plan (sync before extract, embed after
+  consolidate), re-checking score between every step, refusing to spend
+  past the cost cap. Empty brains (no entity pages) or unconfigured embedding
+  keys hit a `max_reachable_score` ceiling and bail with what's missing.
+  Three phase handlers (synthesize / patterns / consolidate) are
+  PROTECTED — only trusted local callers can submit them; MCP cannot.
+  Reference: [`docs/architecture/topologies.md`](./docs/architecture/topologies.md)
+  and the CHANGELOG entry for v0.36.4.0.
 - **Track a founder/company over time (v0.35.7):** when an entity has
   typed metric claims in its `## Facts` fence (`metric: mrr`, `value: 50000`,
   `unit: USD`, `period: monthly` columns), run
@@ -386,6 +406,15 @@ strict behavior when unset.
 - `src/commands/report.ts` — Structured report saver (audit trail for maintenance/enrichment)
 - `src/core/destructive-guard.ts` (v0.26.5) — three-layer protection against accidental data loss in gbrain. `assessDestructiveImpact(engine, sourceId)` counts pages/chunks/embeddings/files for a source. `checkDestructiveConfirmation(impact, opts)` is the fail-closed gate (`--confirm-destructive` required when data is present; `--yes` alone is rejected). `softDeleteSource` / `restoreSource` / `listArchivedSources` / `purgeExpiredSources` drive the source-level archive lifecycle via the column shape introduced in migration v34 (`sources.archived BOOLEAN`, `archived_at TIMESTAMPTZ`, `archive_expires_at TIMESTAMPTZ`). v0.26.5 added the page-level analog through `BrainEngine.softDeletePage` / `restorePage` / `purgeDeletedPages` plus `pages.deleted_at TIMESTAMPTZ` and a partial purge index. The MCP `delete_page` op rewires to `softDeletePage`; new ops `restore_page` (`scope: write`) and `purge_deleted_pages` (`scope: admin`, `localOnly: true`) round out the surface. Search visibility (`buildVisibilityClause` in `src/core/search/sql-ranking.ts`) hides soft-deleted pages and archived sources from `searchKeyword` / `searchKeywordChunks` / `searchVector` in both engines. The autopilot cycle's new 9th `purge` phase calls `purgeExpiredSources` + `engine.purgeDeletedPages(72)` so the 72h TTL is real, not honor-system.
 - `src/commands/pages.ts` (v0.26.5) — `gbrain pages purge-deleted [--older-than HOURS|Nd] [--dry-run] [--json]` operator escape hatch. Mirror of `gbrain sources purge` for the page-level lifecycle. Hard-deletes pages whose `deleted_at` is older than the cutoff; cascades to content_chunks/page_links/chunk_relations.
+- `src/core/op-checkpoint.ts` (v0.36.4.0) — DB-backed checkpoint primitive for long-running ops. Migration v67 introduces `op_checkpoints (op TEXT, fingerprint TEXT, completed_keys JSONB, updated_at TIMESTAMPTZ, PK(op, fingerprint))`. Per-op fingerprint helpers (`embedFingerprint`, `extractFingerprint`, `reindexFingerprint`, `integrityFingerprint`, `purgeFingerprint`) each compute `sha8(canonical-JSON(relevant-params))` so re-running with the same params resumes from `completed_keys` and re-running with different params (e.g. `--limit 100` vs `--limit 200`) starts fresh. Cross-worker safe on Postgres (DB row, no file-lock race); PGLite degrades gracefully. Replaces per-op file-backed JSON checkpoints scattered across `import.ts`, `embed.ts`, `reindex.ts`. The 7-day TTL GC runs in the cycle's `purge` phase. Pinned by `test/op-checkpoint.test.ts` (~15 cases including per-op fingerprint scoping, codex outside-voice review #10-#16). `import-checkpoint.ts` from v0.34.2.0 was NOT migrated to this primitive in v0.36.4.0 — both checkpoint systems coexist without conflict; the migration requires async-propagating 4 sync call sites in `src/commands/import.ts` and rewriting 18 tests, deferred to a follow-up wave.
+- `src/core/brain-score-recommendations.ts` (v0.36.4.0) — pure data layer consumed by both `gbrain doctor --remediation-plan` / `--remediate` and `gbrain features`. `computeRecommendations(checks, opts)` returns `Remediation[]` with stable `id`, content-hash `idempotency_key`, `severity`, `est_seconds`, `est_usd_cost`, `depends_on` (D14: references stable ids, not check names — so plan order is reproducible across runs). `classifyChecks(report)` triages every doctor check into `remediable | human_only | blocked` (D13: three-state, not boolean — `human_only` covers RLS warnings and other human-judgment-required gates; `blocked` covers dependency chains where a parent check failed). `maxReachableScore(checks)` computes the ceiling for empty / under-configured brains (no entity pages → graph_coverage caps at 70; no embedding key → embedding_coverage caps at 60). Cost estimates pull from `anthropic-pricing.ts` for synthesize / patterns / consolidate and `embedding-pricing.ts` for embed jobs. Pinned by `test/brain-score-recommendations.test.ts` (~27 cases) including D6 #5 determinism, D9 content-hash idempotency, D12 DB-backed checkpoint provenance, and D13 three-state triage.
+- `src/commands/doctor.ts` extension (v0.36.4.0) — new `--remediation-plan` and `--remediate` CLI surfaces. `--remediation-plan [--json] [--target-score N]` prints what would run (stable `id`, `idempotency_key`, `severity`, `est_seconds`, `est_usd_cost`, `depends_on`); `--remediate [--yes] [--target-score N] [--max-usd N]` actually submits each plan step as a Minion job, in dependency order, re-checking score between every step. `--target-score N` defaults to 90; refuses to start when target exceeds `maxReachableScore()` and lists what's missing. `--max-usd N` is the cron-safety guard — submission refuses when the plan's `est_total_usd_cost` exceeds the cap (prevents synthesize loops from burning $100 of Anthropic credits while you're at lunch). JSON envelope adds a `Check.remediation` field (additive, schema_version unchanged). Pinned by tests in `test/doctor.test.ts`.
+- `src/commands/jobs.ts` extension (v0.36.4.0) — registers 11 new Minion handlers: `reindex`, `repair-jsonb`, `orphans`, `integrity`, `purge`, `synthesize` (PROTECTED), `patterns` (PROTECTED), `consolidate` (PROTECTED), `extract_facts`, `resolve_symbol_edges`, `recompute_emotional_weight`. Phase wrappers delegate to `runCycle({phases:[name]})` so `src/core/cycle.ts` remains the single source of truth for phase semantics. Same fix wave: the standalone `sync` handler now passes `noExtract: true` to match `runPhaseSync`'s contract — pre-fix, doctor's remediation plan emitting `[sync, extract]` double-extracted (codex #5).
+- `src/core/minions/protected-names.ts` extension (v0.36.4.0) — `PROTECTED_JOB_NAMES` extended with `synthesize`, `patterns`, `consolidate`. These phases internally submit `subagent` children with `allowProtectedSubmit=true` and can therefore spend Anthropic credits; treating them as routine "data-quality maintenance" was a misread caught by codex outside-voice (#6). Only trusted local callers (CLI, autopilot, `doctor --remediate`) can submit them; MCP requests are rejected by `submit_job`'s protected-name guard.
+- `src/commands/autopilot.ts` extension (v0.36.4.0) — targeted-submit loop replaces blanket `autopilot-cycle` dispatch. Each tick: cheap `engine.getHealth()` (single SQL count) + `computeRecommendations()`, then route by shape — `score >= 95 AND no plan AND <60min since last full` → sleep; `score >= 95 AND >=60min` → submit `autopilot-cycle` (60-min floor exercises phase-coupling invariants on healthy brains); `plan <= 3 steps AND est <5min` → submit individual handlers (targeted); `plan large OR score < 70` → submit full `autopilot-cycle`. The `gbrain-cycle` lock ensures targeted submissions and the full cycle can't run concurrently. `maxWaiting: 1` per submit closes the queue-fan-out vector codex flagged (#17). Pre-fix autopilot ran a full 6-phase cycle every 5 minutes regardless of brain state; healthy brains burned synthesize+patterns+embed cycles for zero work.
+- `src/core/cycle.ts` extension (v0.36.4.0) — `purge` phase (the cycle's 9th phase, introduced in v0.26.5 for soft-delete TTLs) extended to GC stale `op_checkpoints` rows older than 7 days. Non-fatal on pre-v67 brains (DROP-target-table check before DELETE).
+- `src/commands/embed.ts` extension (v0.36.4.0) — wires `--background` as the reference integration for the new `maybeBackground()` helper. `gbrain embed --stale --background` submits as a Minion job and prints `job_id=N` to stdout, exits 0. Composable in shell pipelines: `JOB=$(gbrain embed --stale --background | grep -oE 'job_id=[0-9]+' | cut -d= -f2); gbrain jobs follow $JOB`. The other six commands (`extract`, `lint`, `backlinks`, `reindex`, `integrity`, `pages`) adopt the same 4-line pattern in a follow-up wave (T7 deferred).
+- `src/core/cli-options.ts` extension (v0.36.4.0) — new `maybeBackground(opName, fingerprintArgs, runDirect)` helper. Same semantics in TTY and cron (D9 — no `--no-tty-detect` flag, no surprise behavior change between contexts): when `--background` is passed, submits the op as a Minion job via `op_checkpoints` for resumability and returns the `job_id`. `--background --follow` execs `gbrain jobs follow <id>` so the user sees the same stderr stream they'd get from a direct call. PGLite degrades to inline execution with a clear stderr note ("PGLite worker pool not yet supported; running inline"). Returns a tagged union the caller dispatches on.
 - `openclaw.plugin.json` — ClawHub bundle plugin manifest
 
 ### BrainBench — in a sibling repo (v0.20+)
@@ -604,6 +633,13 @@ Key commands added for Minions (job queue):
 - `gbrain jobs stats` — job health dashboard
 - `gbrain jobs smoke [--sigkill-rescue]` — health smoke test. `--sigkill-rescue` is the v0.13.1 regression guard for #219: simulates a killed worker and asserts the stalled job is requeued instead of dead-lettered on first stall.
 - `gbrain jobs work [--queue Q] [--concurrency N]` — start worker daemon (Postgres only)
+
+Key commands added in v0.36.4.0 (brain-health-100 wave):
+- `gbrain doctor --remediation-plan [--target-score N] [--json]` — preview the dependency-ordered plan that would drive the brain to target. JSON envelope is stable: each `Remediation` carries `id`, `idempotency_key` (content-hash for cron-safe retries), `severity`, `est_seconds`, `est_usd_cost`, and `depends_on` (referencing other ids). Empty `recommendations` array when the brain is already at target.
+- `gbrain doctor --remediate [--yes] [--target-score N] [--max-usd N]` — actually submit the plan. Walks dependency order, submits one Minion job per step, re-checks score between steps, refuses to spend past `--max-usd` (defaults: target=90, max-usd=infinite — but cron callers should always pass `--max-usd`). Bails when target exceeds `maxReachableScore()` for the brain (empty / under-configured brains) with a clear list of what's missing.
+- `gbrain embed --stale --background` — submit the embed sweep as a Minion job; print `job_id=N` to stdout; exit. Composable in shell pipelines. Add `--background --follow` to attach to the job's stderr stream (same UX as a direct call).
+- Eleven new Minion job types submittable via `gbrain jobs submit <name>`: `reindex`, `repair-jsonb`, `orphans`, `integrity`, `purge`, `synthesize` (PROTECTED), `patterns` (PROTECTED), `consolidate` (PROTECTED), `extract_facts`, `resolve_symbol_edges`, `recompute_emotional_weight`. PROTECTED ones reject MCP submission and require `--allow-protected` from a trusted local caller (CLI, autopilot, `doctor --remediate`).
+- `gbrain autopilot` (existing daemon) is now health-aware. Tick cost on a healthy brain drops from "full 6-phase cycle every 5 minutes" to "one SQL count, then sleep". Degraded brains get targeted handlers (`[sync]`, `[embed]`, `[backlinks]`) instead of the full cycle when the plan is small; large plans still get `autopilot-cycle`. The "60-minute full-cycle floor" runs the full phase set on a healthy brain at least every hour so phase-coupling invariants (lint-first, synthesize-before-patterns, embed-after-consolidate) keep getting exercised.
 
 Key commands added in v0.32.7 (CJK fix wave):
 - `gbrain reindex --markdown [--limit N] [--dry-run] [--json] [--no-embed] [--repo PATH]` — operator-facing markdown re-chunk sweep. Walks pages with `chunker_version < MARKDOWN_CHUNKER_VERSION` (currently 2) and re-imports each with `forceRechunk: true` so the new chunker shape actually applies. Run automatically by `gbrain upgrade`'s post-upgrade hook; available manually for triage.
@@ -1909,32 +1945,43 @@ If you fetched this file by URL without cloning yet, the companion files live at
 
 ## Step 1: Install GBrain
 
+Default path (Bun is required — gbrain is a Bun + TypeScript runtime):
+
 ```bash
-git clone https://github.com/garrytan/gbrain.git ~/gbrain && cd ~/gbrain
 curl -fsSL https://bun.sh/install | bash
 export PATH="$HOME/.bun/bin:$PATH"
-bun install && bun link
+bun install -g github:garrytan/gbrain
 ```
 
 Verify: `gbrain --version` should print a version number. If `gbrain` is not found,
 restart the shell or add the PATH export to the shell profile.
 
-> **Do NOT use `bun install -g github:garrytan/gbrain`.** Bun blocks the top-level
-> postinstall hook on global installs, so schema migrations never run and the CLI
-> aborts with `Aborted()` when it opens PGLite. Use the `git clone + bun link` path
-> above. Tracking issue: [#218](https://github.com/garrytan/gbrain/issues/218).
+> **If `bun install -g` aborts or `gbrain doctor` reports `schema_version: 0`** (Bun
+> occasionally blocks the top-level postinstall hook on global installs, so schema
+> migrations don't run automatically), the CLI prints a recovery hint pointing at
+> [#218](https://github.com/garrytan/gbrain/issues/218). Run `gbrain apply-migrations --yes`
+> to recover. If that doesn't work, fall back to the deterministic install path:
+>
+> ```bash
+> git clone https://github.com/garrytan/gbrain.git ~/gbrain && cd ~/gbrain
+> bun install && bun link
+> ```
 
 ## Step 2: API Keys
 
-Ask the user for these:
+Ask the user for these. gbrain defaults to the ZeroEntropy embedding + reranker stack
+(as of v0.36.2.0); OpenAI/Voyage are still supported as fallbacks via `gbrain config
+set embedding_model <provider:model>`.
 
 ```bash
-export OPENAI_API_KEY=sk-...          # required for vector search
-export ANTHROPIC_API_KEY=sk-ant-...   # optional, improves search quality
+export ZEROENTROPY_API_KEY=ze-...     # default embedding + reranker (v0.36.2.0+)
+export OPENAI_API_KEY=sk-...          # fallback for vector search; also used for chat models
+export ANTHROPIC_API_KEY=sk-ant-...   # optional, improves search quality via query expansion
 ```
 
-Save to shell profile or `.env`. Without OpenAI, keyword search still works.
-Without Anthropic, search works but skips query expansion.
+Save to shell profile or `.env`. Keys are picked up by `gbrain config set` automatically
+or can be stored in `~/.gbrain/config.json` (file plane). Without any embedding provider,
+keyword search still works. Without Anthropic, search works but skips query expansion.
 
 ## Step 3: Create the Brain
 
@@ -2045,8 +2092,24 @@ and supports `--since YYYY-MM-DD` for incremental runs.
 
 ## Step 5: Load Skills
 
-Read `~/gbrain/skills/RESOLVER.md`. This is the skill dispatcher. It tells you which
-skill to read for any task. Save this to your memory permanently.
+If you're running an agent platform (OpenClaw, Hermes, or any repo with a workspace),
+scaffold the bundled skills into it:
+
+```bash
+cd /path/to/agent/workspace
+gbrain skillpack scaffold --all       # copy 43 curated skills + RESOLVER.md
+```
+
+Scaffolded skills are first-class files in your repo. Edit freely; re-running scaffold
+refuses to overwrite anything that exists. Use `gbrain skillpack reference <name>` to
+diff against gbrain's bundle when you want upstream improvements. (The legacy
+`gbrain skillpack install` managed-block model was retired in v0.36.0.0 — run
+`gbrain skillpack migrate-fence` once if upgrading from an older release.)
+
+Whether you scaffolded or not, read `skills/RESOLVER.md` (in your workspace, or the
+bundled copy at `~/gbrain/skills/RESOLVER.md` when running from the cloned repo). It's
+the skill dispatcher — tells you which skill to read for any task. Save this to your
+memory permanently.
 
 The three most important skills to adopt immediately:
 
@@ -2074,14 +2137,17 @@ If skipped, minimal defaults are installed automatically.
 
 ## Step 7: Recurring Jobs
 
-Set up using your platform's scheduler (OpenClaw cron, Railway cron, crontab):
+Set up using your platform's scheduler (OpenClaw cron, Railway cron, crontab), or skip the
+platform glue entirely with `gbrain autopilot --install` (built-in self-maintaining daemon):
 
 - **Live sync** (every 15 min): `gbrain sync --repo ~/brain && gbrain embed --stale`
-- **Auto-update** (daily): `gbrain check-update --json` (tell user, never auto-install)
-- **Dream cycle** (nightly): read `docs/guides/cron-schedule.md` for the full protocol.
+  — or `gbrain sync --watch` for a continuous loop.
+- **Auto-update** (daily): `gbrain check-update --json` (tell user, never auto-install).
+- **Dream cycle** (nightly): `gbrain dream` runs the 8-phase overnight maintenance cycle.
   Entity sweep, citation fixes, memory consolidation, plus (v0.23+) overnight conversation
-  synthesis and cross-session pattern detection. 8 phases, one cron-friendly command. This
-  is what makes the brain compound. Do not skip it.
+  synthesis and cross-session pattern detection. One cron-friendly command. This is what
+  makes the brain compound. Do not skip it. See `docs/guides/cron-schedule.md` for the
+  full protocol.
 - **Weekly**: `gbrain doctor --json && gbrain embed --stale`
 
 ## Step 8: Integrations
@@ -2099,9 +2165,18 @@ actually works) is the most important.
 
 ## Upgrade
 
+If you installed via `bun install -g`:
+
+```bash
+gbrain upgrade                        # self-updates the binary, runs schema migrations,
+                                      # and prints post-upgrade notes for the version range
+```
+
+If you installed via `git clone + bun link`:
+
 ```bash
 cd ~/gbrain && git pull origin master && bun install
-gbrain init                           # apply schema migrations (idempotent)
+gbrain apply-migrations --yes         # apply schema migrations (idempotent)
 gbrain post-upgrade                   # show migration notes for the version range
 ```
 
@@ -2281,6 +2356,8 @@ The brain wires itself. Every page write extracts entity references and creates 
 
 GBrain is those patterns, generalized. Install in 30 minutes. Your agent does the work. As Garry's personal agent gets smarter, so does yours.
 
+**New in v0.36.4.0 — Your agent drives the brain to 90/100 by itself.** One command does the loop you used to run by hand: `gbrain doctor --remediate --yes --target-score 90 --max-usd 5`. It computes a dependency-ordered plan (sync before extract, embed after consolidate), submits each step as a Minion job, re-checks score between every step, and refuses to spend past your cost cap. Cron can drive it unattended. `gbrain doctor --remediation-plan --json` previews what would run. Autopilot now does the same thing on its 5-minute tick: small problems get targeted handlers, big problems get the full cycle, a healthy brain sleeps for 60 minutes instead of grinding through synthesize+patterns+embed every tick. Eleven new things you can submit as background jobs (`reindex`, `repair-jsonb`, `orphans`, `integrity`, `purge`, plus six cycle phases); three of them (synthesize, patterns, consolidate) are PROTECTED so an MCP-connected agent can't silently burn Anthropic credits. New `--background` flag on `gbrain embed` submits the job and exits with `job_id=N` for shell composition.
+
 **New in v0.35.7 — Temporal trajectory + founder scorecard.** Author typed metric assertions in the `## Facts` fence (`mrr=50000`, `arr=2000000`, `team_size=12`) and gbrain stores them as first-class typed columns. `gbrain eval trajectory companies/acme-example` prints the chronological history with regressions auto-flagged inline. `gbrain founder scorecard companies/acme-example` rolls up claim accuracy, consistency, growth direction, and red flags into a stable `schema_version: 1` JSON contract. New MCP op `find_trajectory` exposes the same data to agents (read scope, visibility-filtered for remote callers). The `consolidate` cycle phase now writes `valid_until` on chronologically-superseded facts AND uses semantic upsert on `(page_id, claim, since_date)` — re-running the dream cycle on stable input is now a true no-op (fixed a pre-existing duplicate-takes bug from prior versions).
 
 > **~30 minutes to a fully working brain.** Database ready in 2 seconds (PGLite, no server). You just answer questions about API keys.
@@ -2293,14 +2370,14 @@ GBrain runs in three shapes. Pick the one that matches how you use AI agents tod
 
 ### Run with your agent platform
 
-Already using [OpenClaw](https://github.com/garrytan/openclaw) or [Hermes](https://github.com/garrytan/hermes)? GBrain installs as a skillpack into your agent's workspace.
+Already using [OpenClaw](https://github.com/garrytan/openclaw) or [Hermes](https://github.com/garrytan/hermes)? GBrain installs as a skillpack scaffold into your agent's workspace.
 
 ```bash
 gbrain init --pglite
-gbrain skillpack install
+gbrain skillpack scaffold --all   # or: scaffold <name> per skill
 ```
 
-That's it. Your agent picks up 43 skills (signal detection, brain-ops, ingest, enrich, citation-fixer, daily-task-manager, cron-scheduler, eval framework, and 35 more). Routing lives in `skills/RESOLVER.md` — the agent reads it once per request, picks the right skill, executes.
+That's it. Your agent picks up 43 skills (signal detection, brain-ops, ingest, enrich, citation-fixer, daily-task-manager, cron-scheduler, eval framework, and 35 more). Routing lives in `skills/RESOLVER.md` — the agent reads it once per request, picks the right skill, executes. Scaffolded skills are first-class members of your agent repo — you own them, edit freely; `gbrain skillpack reference <name>` diffs your copy against gbrain's bundle when you want to pull upstream improvements. (The legacy `gbrain skillpack install` managed-block model was retired in v0.36.0.0; run `gbrain skillpack migrate-fence` once if you're upgrading from an older release.)
 
 ### CLI standalone
 
@@ -2365,7 +2442,7 @@ The whole loop is described in [`docs/architecture/topologies.md`](docs/architec
 
 Data flowing into the brain. Each integration is a recipe — markdown + setup hints — that ships in `recipes/` and is discoverable via `gbrain integrations list`.
 
-- **Voice**: Whisper or Groq voice-to-brain capture. Setup in [`docs/integrations/voice.md`](docs/integrations/voice.md).
+- **Voice**: Phone calls create brain pages via Twilio + OpenAI Realtime (or DIY STT+LLM+TTS). Setup recipe: [`recipes/twilio-voice-brain.md`](recipes/twilio-voice-brain.md).
 - **Email + calendar**: webhook handlers that route to brain signals. [`docs/integrations/meeting-webhooks.md`](docs/integrations/meeting-webhooks.md).
 - **Embedding providers**: 14 recipes covering OpenAI (default fallback), Voyage, ZeroEntropy (default), Google Gemini, Azure OpenAI, MiniMax, Alibaba DashScope, Zhipu, Ollama (local), llama.cpp llama-server (local), LiteLLM proxy. Pricing matrix + decision tree in [`docs/integrations/embedding-providers.md`](docs/integrations/embedding-providers.md).
 - **Credential gateway**: vault-aware secret distribution. [`docs/integrations/credential-gateway.md`](docs/integrations/credential-gateway.md).

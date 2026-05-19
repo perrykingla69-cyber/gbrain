@@ -10,6 +10,8 @@ The brain wires itself. Every page write extracts entity references and creates 
 
 GBrain is those patterns, generalized. Install in 30 minutes. Your agent does the work. As Garry's personal agent gets smarter, so does yours.
 
+**New in v0.36.4.0 — Your agent drives the brain to 90/100 by itself.** One command does the loop you used to run by hand: `gbrain doctor --remediate --yes --target-score 90 --max-usd 5`. It computes a dependency-ordered plan (sync before extract, embed after consolidate), submits each step as a Minion job, re-checks score between every step, and refuses to spend past your cost cap. Cron can drive it unattended. `gbrain doctor --remediation-plan --json` previews what would run. Autopilot now does the same thing on its 5-minute tick: small problems get targeted handlers, big problems get the full cycle, a healthy brain sleeps for 60 minutes instead of grinding through synthesize+patterns+embed every tick. Eleven new things you can submit as background jobs (`reindex`, `repair-jsonb`, `orphans`, `integrity`, `purge`, plus six cycle phases); three of them (synthesize, patterns, consolidate) are PROTECTED so an MCP-connected agent can't silently burn Anthropic credits. New `--background` flag on `gbrain embed` submits the job and exits with `job_id=N` for shell composition.
+
 **New in v0.35.7 — Temporal trajectory + founder scorecard.** Author typed metric assertions in the `## Facts` fence (`mrr=50000`, `arr=2000000`, `team_size=12`) and gbrain stores them as first-class typed columns. `gbrain eval trajectory companies/acme-example` prints the chronological history with regressions auto-flagged inline. `gbrain founder scorecard companies/acme-example` rolls up claim accuracy, consistency, growth direction, and red flags into a stable `schema_version: 1` JSON contract. New MCP op `find_trajectory` exposes the same data to agents (read scope, visibility-filtered for remote callers). The `consolidate` cycle phase now writes `valid_until` on chronologically-superseded facts AND uses semantic upsert on `(page_id, claim, since_date)` — re-running the dream cycle on stable input is now a true no-op (fixed a pre-existing duplicate-takes bug from prior versions).
 
 > **~30 minutes to a fully working brain.** Database ready in 2 seconds (PGLite, no server). You just answer questions about API keys.
@@ -22,14 +24,14 @@ GBrain runs in three shapes. Pick the one that matches how you use AI agents tod
 
 ### Run with your agent platform
 
-Already using [OpenClaw](https://github.com/garrytan/openclaw) or [Hermes](https://github.com/garrytan/hermes)? GBrain installs as a skillpack into your agent's workspace.
+Already using [OpenClaw](https://github.com/garrytan/openclaw) or [Hermes](https://github.com/garrytan/hermes)? GBrain installs as a skillpack scaffold into your agent's workspace.
 
 ```bash
 gbrain init --pglite
-gbrain skillpack install
+gbrain skillpack scaffold --all   # or: scaffold <name> per skill
 ```
 
-That's it. Your agent picks up 43 skills (signal detection, brain-ops, ingest, enrich, citation-fixer, daily-task-manager, cron-scheduler, eval framework, and 35 more). Routing lives in `skills/RESOLVER.md` — the agent reads it once per request, picks the right skill, executes.
+That's it. Your agent picks up 43 skills (signal detection, brain-ops, ingest, enrich, citation-fixer, daily-task-manager, cron-scheduler, eval framework, and 35 more). Routing lives in `skills/RESOLVER.md` — the agent reads it once per request, picks the right skill, executes. Scaffolded skills are first-class members of your agent repo — you own them, edit freely; `gbrain skillpack reference <name>` diffs your copy against gbrain's bundle when you want to pull upstream improvements. (The legacy `gbrain skillpack install` managed-block model was retired in v0.36.0.0; run `gbrain skillpack migrate-fence` once if you're upgrading from an older release.)
 
 ### CLI standalone
 
@@ -94,7 +96,7 @@ The whole loop is described in [`docs/architecture/topologies.md`](docs/architec
 
 Data flowing into the brain. Each integration is a recipe — markdown + setup hints — that ships in `recipes/` and is discoverable via `gbrain integrations list`.
 
-- **Voice**: Whisper or Groq voice-to-brain capture. Setup in [`docs/integrations/voice.md`](docs/integrations/voice.md).
+- **Voice**: Phone calls create brain pages via Twilio + OpenAI Realtime (or DIY STT+LLM+TTS). Setup recipe: [`recipes/twilio-voice-brain.md`](recipes/twilio-voice-brain.md).
 - **Email + calendar**: webhook handlers that route to brain signals. [`docs/integrations/meeting-webhooks.md`](docs/integrations/meeting-webhooks.md).
 - **Embedding providers**: 14 recipes covering OpenAI (default fallback), Voyage, ZeroEntropy (default), Google Gemini, Azure OpenAI, MiniMax, Alibaba DashScope, Zhipu, Ollama (local), llama.cpp llama-server (local), LiteLLM proxy. Pricing matrix + decision tree in [`docs/integrations/embedding-providers.md`](docs/integrations/embedding-providers.md).
 - **Credential gateway**: vault-aware secret distribution. [`docs/integrations/credential-gateway.md`](docs/integrations/credential-gateway.md).
