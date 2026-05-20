@@ -896,6 +896,22 @@ async function handleCliOnly(command: string, args: string[]) {
       return;
     }
 
+    // v0.36+ brain-health-100: --remediation-plan and --remediate go
+    // through dedicated functions that compute from engine.getHealth()
+    // (cheap path D7), NOT the full doctor walk.
+    if (args.includes('--remediation-plan')) {
+      const { runRemediationPlan } = await import('./commands/doctor.ts');
+      const eng = await connectEngine();
+      try { await runRemediationPlan(eng, args); } finally { await eng.disconnect(); }
+      return;
+    }
+    if (args.includes('--remediate')) {
+      const { runRemediate } = await import('./commands/doctor.ts');
+      const eng = await connectEngine();
+      try { await runRemediate(eng, args); } finally { await eng.disconnect(); }
+      return;
+    }
+
     // Doctor runs filesystem checks first (no DB needed), then DB checks.
     // --fast skips DB checks entirely.
     const { runDoctor } = await import('./commands/doctor.ts');
@@ -1136,7 +1152,28 @@ async function handleCliOnly(command: string, args: string[]) {
         break;
       }
       // v0.32.7 CJK wave — post-upgrade markdown re-chunk sweep.
+      // v0.36 Phase 3 wave — `gbrain reindex --multimodal` re-embeds content_chunks
+      // into the unified Voyage multimodal-3 column.
       case 'reindex': {
+        if (args.includes('--multimodal')) {
+          const { runReindexMultimodal } = await import('./commands/reindex-multimodal.ts');
+          const limitIdx = args.indexOf('--limit');
+          const limitVal = limitIdx >= 0 && limitIdx + 1 < args.length ? parseInt(args[limitIdx + 1], 10) : undefined;
+          const result = await runReindexMultimodal(engine, {
+            limit: Number.isFinite(limitVal as number) ? (limitVal as number) : undefined,
+            dryRun: args.includes('--dry-run'),
+            costEstimate: args.includes('--cost-estimate'),
+            noEmbed: args.includes('--no-embed'),
+            json: args.includes('--json'),
+            yes: args.includes('--yes'),
+          });
+          if (args.includes('--json')) {
+            console.log(JSON.stringify(result, null, 2));
+          } else {
+            console.log(`reindex --multimodal: ${result.reembedded} re-embedded, ${result.failed} failed, ${result.pending_after} pending. est. cost: $${result.cost_usd_estimate.toFixed(2)}`);
+          }
+          break;
+        }
         const { runReindex } = await import('./commands/reindex.ts');
         await runReindex(engine, args);
         break;

@@ -119,7 +119,11 @@ CREATE TABLE IF NOT EXISTS content_chunks (
   -- chunks carry their 1024-dim Voyage multimodal vector in embedding_image
   -- (independent of the brain primary embedding column dim).
   modality        TEXT NOT NULL DEFAULT 'text',
-  embedding_image vector(1024)
+  embedding_image vector(1024),
+  -- v0.36 Phase 3 cross-modal: unified column populated by reindex
+  -- (search.unified_multimodal=true routes here). Migration v75 adds it
+  -- on upgrade; fresh installs land at head with the column present.
+  embedding_multimodal vector(1024)
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_page_index ON content_chunks(page_id, chunk_index);
@@ -759,6 +763,22 @@ CREATE TABLE IF NOT EXISTS oauth_codes (
   expires_at             BIGINT NOT NULL,
   created_at             TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ============================================================
+-- op_checkpoints (v0.36+ autonomous-remediation wave, migration v67)
+-- Shared checkpoint table for long-running ops. See migrate.ts:67 for
+-- the design rationale; PGLite engine can also fall back to file-backed
+-- storage per src/core/op-checkpoint.ts.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS op_checkpoints (
+  op             TEXT NOT NULL,
+  fingerprint    TEXT NOT NULL,
+  completed_keys JSONB NOT NULL DEFAULT '[]'::jsonb,
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (op, fingerprint)
+);
+CREATE INDEX IF NOT EXISTS op_checkpoints_updated_at_idx
+  ON op_checkpoints (updated_at);
 
 -- ============================================================
 -- Trigger-based search_vector (spans pages + timeline_entries)

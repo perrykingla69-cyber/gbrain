@@ -155,7 +155,10 @@ CREATE TABLE IF NOT EXISTS content_chunks (
   -- mixed-provider brains (e.g. OpenAI 1536 text + Voyage 1024 images) keep
   -- both columns populated with distinct dim spaces.
   modality              TEXT NOT NULL DEFAULT 'text',
-  embedding_image       vector(1024)
+  embedding_image       vector(1024),
+  -- v0.36 Phase 3 cross-modal: unified column populated by reindex.
+  -- Migration v75 also adds it for upgrade paths.
+  embedding_multimodal  vector(1024)
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_page_index ON content_chunks(page_id, chunk_index);
@@ -465,6 +468,26 @@ CREATE TABLE IF NOT EXISTS oauth_codes (
 -- Composite indexes for admin dashboard request log queries
 CREATE INDEX IF NOT EXISTS idx_mcp_log_time_agent ON mcp_request_log(created_at, token_name);
 CREATE INDEX IF NOT EXISTS idx_mcp_log_agent_time ON mcp_request_log(agent_name, created_at DESC);
+
+-- ============================================================
+-- op_checkpoints: shared checkpoint table for long-running ops
+-- ============================================================
+-- v0.36+ autonomous-remediation wave (migration v67). Pre-fix each op
+-- carried its own file-backed checkpoint (or none); that broke on
+-- Postgres multi-worker hosts and fingerprint-collided across param
+-- variations. Fingerprint = sha8 of canonical-JSON of relevant params
+-- per op (mode, source, chunker_version, embedding_model+dims, etc.).
+-- completed_keys = op-defined string array. GC: cycle purge phase
+-- drops rows older than 7 days.
+CREATE TABLE IF NOT EXISTS op_checkpoints (
+  op             TEXT NOT NULL,
+  fingerprint    TEXT NOT NULL,
+  completed_keys JSONB NOT NULL DEFAULT '[]'::jsonb,
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (op, fingerprint)
+);
+CREATE INDEX IF NOT EXISTS op_checkpoints_updated_at_idx
+  ON op_checkpoints (updated_at);
 
 -- ============================================================
 -- files: binary attachments stored in Supabase Storage

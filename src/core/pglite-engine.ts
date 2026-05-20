@@ -1289,15 +1289,20 @@ export class PGLiteEngine implements BrainEngine {
     // v0.36 (D11): column routing via resolved descriptor. Engine doesn't
     // read config — caller resolved at hybrid/op boundary. The cast SQL
     // ($1::vector vs $1::halfvec(N)) comes from buildVectorCastFragment.
+    //
+    // v0.36 Phase 3: 'embedding_multimodal' is the unified column populated
+    // by `gbrain reindex --multimodal`. No modality filter — the column
+    // itself is the discriminator (only re-embedded rows have non-NULL).
     const resolvedCol = normalizeEngineColumn(opts?.embeddingColumn);
     const { col, castSql } = buildVectorCastFragment(resolvedCol);
-    // Image rows live in modality='image'; text/code in 'text'. Restrict
-    // by modality so non-image columns can't accidentally pull image
-    // chunks (or vice versa). resolved.name has already passed regex
-    // validation; never compares against raw input.
-    const modalityFilter = resolvedCol.name === 'embedding_image'
-      ? `AND cc.modality = 'image'`
-      : `AND cc.modality = 'text'`;
+    let modalityFilter: string;
+    if (resolvedCol.name === 'embedding_image') {
+      modalityFilter = `AND cc.modality = 'image'`;
+    } else if (resolvedCol.name === 'embedding_multimodal') {
+      modalityFilter = '';
+    } else {
+      modalityFilter = `AND cc.modality = 'text'`;
+    }
 
     const { rows } = await this.db.query(
       `WITH hnsw_candidates AS (
