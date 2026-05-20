@@ -119,7 +119,11 @@ CREATE TABLE IF NOT EXISTS content_chunks (
   -- chunks carry their 1024-dim Voyage multimodal vector in embedding_image
   -- (independent of the brain primary embedding column dim).
   modality        TEXT NOT NULL DEFAULT 'text',
-  embedding_image vector(1024)
+  embedding_image vector(1024),
+  -- v0.36 Phase 3 cross-modal: unified column populated by reindex
+  -- (search.unified_multimodal=true routes here). Migration v75 adds it
+  -- on upgrade; fresh installs land at head with the column present.
+  embedding_multimodal vector(1024)
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_page_index ON content_chunks(page_id, chunk_index);

@@ -405,6 +405,15 @@ export interface SearchResult {
   score: number;
   stale: boolean;
   /**
+   * v0.36 (cross-modal wave): the chunk's modality discriminator from
+   * content_chunks.modality. 'text' for the existing text-embedding rows,
+   * 'image' for rows populated by importImageFile. Surfaced so callers /
+   * renderers can distinguish text matches from image matches in `'both'`
+   * mode results. Optional for back-compat with engines that don't project
+   * the column (defaults to 'text' in renderers when absent).
+   */
+  modality?: 'text' | 'image';
+  /**
    * v0.18.0: the sources.id the page belongs to. Dedup composite-keys
    * on (source_id, slug) — see src/core/search/dedup.ts. Defaults to
    * 'default' for pre-v0.17 rows that lacked the column.
@@ -541,8 +550,10 @@ export interface SearchOpts {
    * 1. String name (legacy + user-facing). Engine and hybridSearch convert
    *    to ResolvedColumn at the boundary via `resolveEmbeddingColumn()`.
    *    Built-in names: 'embedding' (default, text), 'embedding_image'
-   *    (multimodal). Custom user-declared names also accepted when
-   *    registered in `embedding_columns` config.
+   *    (multimodal). v0.36 cross-modal wave adds 'embedding_multimodal'
+   *    (unified column populated by `gbrain reindex --multimodal`). Custom
+   *    user-declared names also accepted when registered in
+   *    `embedding_columns` config.
    *
    * 2. ResolvedColumn descriptor (internal). The engine ONLY accepts
    *    this shape — hybridSearch resolves once at entry and passes the
@@ -556,7 +567,7 @@ export interface SearchOpts {
    * searchKeyword is unaffected — modality filtering on the keyword path
    * is independent.
    */
-  embeddingColumn?: 'embedding' | 'embedding_image' | string | ResolvedColumn;
+  embeddingColumn?: 'embedding' | 'embedding_image' | 'embedding_multimodal' | string | ResolvedColumn;
   /**
    * @deprecated v0.29.1: use `since` instead. Removed in v0.30.
    * v0.27.0: filter results to pages updated/created after this date. ISO-8601 string.
@@ -636,33 +647,34 @@ export interface SearchOpts {
     rerankerFn?: (input: { query: string; documents: string[]; topN?: number; model?: string; signal?: AbortSignal; timeoutMs?: number }) => Promise<{ index: number; relevanceScore: number }[]>;
   };
   /**
-   * v0.35.6.0 — floor-ratio gate for metadata-axis boost stages (backlink,
-   * salience, recency). Number in [0, 1] or undefined (default = no gate).
-   *
-   * When set, each gated stage skips results whose pre-boost score is below
-   * `floorRatio * topScore`, where `topScore` is computed ONCE at
-   * `runPostFusionStages` entry from the post-cosine-rescore snapshot. The
-   * same threshold gates all three stages — order-independent semantic.
-   *
-   * Resolution chain (mirrors other search-lite knobs):
-   *   per-call `SearchOpts.floorRatio` → config `search.floor_ratio`
-   *   → MODE_BUNDLES[mode].floor_ratio (undefined for all 3 modes today)
-   *   → undefined fallback.
-   *
-   * SCOPE: gates ONLY the three metadata stages. Exact-match boost
-   * (`applyExactMatchBoost` in intent-weights.ts) runs independently as a
-   * lexical-relevance signal and is NOT gated by design.
-   *
-   * Sensible operator override values for dense-embedder corpora: 0.85-0.95.
-   * Default stays undefined pending per-corpus ablation evidence (see
-   * `TODOS.md` floor-ratio ablation entry).
-   *
-   * Out-of-range values (negative, > 1, NaN, Infinity) silently disable
-   * the gate at the runtime layer; the config-parse layer also rejects
-   * out-of-range values. Defense in depth — a malformed value never
-   * gates anything.
+   * v0.35.6.0 — floor-ratio gate for metadata-axis boost stages.
+   * Number in [0, 1] or undefined (default = no gate). When set, each gated
+   * stage skips results whose pre-boost score is below `floorRatio * topScore`.
+   * Same threshold gates all three metadata stages; exact-match boost runs
+   * independently. Out-of-range values silently disable the gate.
+   * Sensible operator overrides for dense-embedder corpora: 0.85-0.95.
    */
   floorRatio?: number;
+  /**
+   * v0.36 cross-modal wave: route this search through the multimodal
+   * embedding space (Voyage multimodal-3 by default).
+   *
+   * - 'text' (default for queries that don't match image-intent regex):
+   *   existing text-embedding path. No behavior change vs pre-v0.36.
+   * - 'image': force routing through the multimodal model + embedding_image
+   *   column. Skip LLM expansion (image embeddings handle synonyms in-space)
+   *   and skip keyword search (no FTS index on image content).
+   * - 'both': run text and image vector searches in parallel; merge via
+   *   modality-weighted RRF.
+   * - 'auto' (literal): same effect as undefined — let intent classifier
+   *   decide. Accepted on the wire so MCP callers can be explicit.
+   *
+   * Cross-modal override matrix (D9): when effective modality is 'image',
+   * cross-modal path overrides expansion (false) and reranker (false)
+   * regardless of mode bundle. zerank-2 can't rerank image embeddings;
+   * sending them produces garbage scores.
+   */
+  crossModal?: 'text' | 'image' | 'both' | 'auto';
 }
 
 /**

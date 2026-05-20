@@ -159,7 +159,10 @@ CREATE TABLE IF NOT EXISTS content_chunks (
   -- mixed-provider brains (e.g. OpenAI 1536 text + Voyage 1024 images) keep
   -- both columns populated with distinct dim spaces.
   modality              TEXT NOT NULL DEFAULT 'text',
-  embedding_image       vector(1024)
+  embedding_image       vector(1024),
+  -- v0.36 Phase 3 cross-modal: unified column populated by reindex.
+  -- Migration v75 also adds it for upgrade paths.
+  embedding_multimodal  vector(1024)
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_page_index ON content_chunks(page_id, chunk_index);

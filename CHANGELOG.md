@@ -2,6 +2,126 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.36.6.0] - 2026-05-19
+
+**Your photos finally show up when you ask. The brain just got eyes.**
+**11K image embeddings stopped sitting unused; cross-modal search is live.**
+
+For the past few releases gbrain had image embeddings sitting in a 1024d Voyage multimodal column with a valid 83 MB HNSW index, and no user-facing query path could touch them. Text queries always embedded through the text model. Dimensions didn't match. The image space was dead storage.
+
+This release wires the routing. `gbrain search "show me hackathon photos"` returns image chunks. `gbrain search --image ./screenshot.png` accepts an image as a query. `gbrain reindex --multimodal` flattens both modalities into a single embedding space if you want to commit to unified retrieval. And `search_by_image` over MCP gets a daily Voyage spend cap so an authenticated OAuth client can't burn the operator's account.
+
+Default behavior unchanged for normal text queries. Cross-modal routing fires only on detected image-intent phrasings, with an opt-in Haiku tie-break for genuinely ambiguous wording.
+
+### What lands across five atomic commits
+
+| Commit | What it ships | What it unlocks |
+|---|---|---|
+| 0 | Multimodal embed batching + partial-failure surfacing + query-side wrappers; new SSRF-validate helper with DNS rebinding defense | Foundation for Phase 3 reindex; every URL-fetching feature gets DNS-resolution + per-record A/AAAA inspection |
+| 1 | Text → image search: cross-modal intent regex + hybrid routing + weighted RRF for `'both'` mode + 7 new search knobs in `SEARCH_MODE_CONFIG_KEYS` and `knobsHash` (bumped 2→3) + `gbrain backfill modality` cleanup + doctor check | "show me hackathon photos" now finds image chunks; cache contamination across modality knobs closed |
+| 2 | Image → text/OCR search: `loadImageInput` with SSRF redirect re-validation + 10 MB cap + magic-byte sniff; `search_by_image` MCP op with remote `image_path` ban + daily Voyage spend cap per OAuth client | `gbrain search --image ./photo.jpg "who is this person"` runs; remote MCP clients can submit URLs / base64 but cannot read arbitrary server files |
+| 3 | Phase 3 unified column: schema migration v75 adds `content_chunks.embedding_multimodal vector(1024)`; `gbrain reindex --multimodal` walks NULL rows with checkpoint resume + cost prompt + writer lock; hybrid routing through unified column when `search.unified_multimodal=true` with fail-open + source-aware coverage check | Operators opt into true image→full-text-knowledge retrieval (Phase 2 then auto-upgrades to richer results) |
+| 4 | Opt-in LLM tie-break: when `search.cross_modal.llm_intent=true` AND regex returns 'text' AND query is genuinely ambiguous, a Haiku call refines the routing | Catches "any pictures from last week's offsite?" — the narrow band the regex misses (<1% of queries when on; ~$0.0001 per escalation; fail-open on every error) |
+
+### The numbers that matter
+
+51 new test cases across 8 test files. 6860 unit tests pass after the wave (0 regressions). 620+ E2E tests pass against real Postgres. Schema migrations applied cleanly through v75.
+
+| Surface | Before | After | What changed |
+|---|---|---|---|
+| Image-column query path | dead storage | live retrieval | crossModal flag + multimodal query embedding |
+| `search_by_image` op | did not exist | scope:read MCP op | D18 path ban + size cap + spend cap |
+| Voyage spend per OAuth client | unbounded | $5/day cap (configurable) | mcp_spend_log table + checkBudget gate |
+| SSRF defense on URL fetch | static IP block | static + DNS resolve all records | new `core/ssrf-validate.ts` helper, reusable |
+| Search cache contamination | possible across cross-modal flags | structurally impossible | knobsHash v3 includes 7 new cross-modal knobs |
+| Modality on historical chunks | "image" tag missing on pre-v0.27.1 image-asset rows | doctor surfaces + `gbrain backfill modality` flips them | new registry entry; idempotent |
+
+### What this means for you
+
+You don't need to opt in to anything for the basic improvement: queries that name visual content ("show me", "find images of", "what does X look like") now route through Voyage multimodal-3 and return image chunks that were sitting in the brain. Try `gbrain search "show me hackathon photos"`. If it returns nothing, your image chunks may pre-date the modality tag — run `gbrain doctor` for the paste-ready `gbrain backfill modality` fix.
+
+For the image-as-query workflow, use `gbrain search --image ./photo.jpg`. Pair with `--query "founder mode"` to RRF-merge a text refinement axis.
+
+For the full image→text-knowledge experience (find Alice's bio from a photo, not just visually-similar photos), opt into Phase 3:
+
+```
+gbrain reindex --multimodal --dry-run    # see the cost estimate
+gbrain reindex --multimodal              # ~2-3h on a 100K-chunk brain
+gbrain config set search.unified_multimodal true
+```
+
+Auto-flip prompt fires at coverage=100% so the last step is suggested inline.
+
+### To take advantage of v0.36.6.0
+
+`gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about anything:
+
+1. **Run the orchestrator manually:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+2. **Verify the new surface:**
+   ```bash
+   gbrain doctor | grep -E 'modal|cross'
+   gbrain search modes        # cross-modal knobs should be listed
+   gbrain --tools-json | jq '.[] | select(.name=="search_by_image")'
+   ```
+3. **Backfill historical image chunks** (if doctor surfaces the warn):
+   ```bash
+   gbrain backfill modality
+   ```
+4. **If any step fails or the numbers look wrong,** please file an issue: https://github.com/garrytan/gbrain/issues with `gbrain doctor` output and `~/.gbrain/upgrade-errors.jsonl` if present.
+
+### Itemized changes
+
+#### Phase 1 — text → image routing
+- `src/core/search/query-intent.ts`: new `suggestedModality: 'text' | 'image' | 'both'` axis on `QuerySuggestions`; module-scope `CROSS_MODAL_PATTERNS` regex array; `isAmbiguousModalityQuery` heuristic gate for Phase 4 LLM escalation.
+- `src/core/types.ts`: `SearchOpts.crossModal: 'text' | 'image' | 'both' | 'auto'` + `SearchResult.modality: 'text' | 'image'`.
+- `src/core/search/mode.ts`: 7 new ModeBundle knobs; KNOBS_HASH_VERSION bumped 2→3; SEARCH_MODE_CONFIG_KEYS registry extended.
+- `src/core/search/hybrid.ts`: routing branch resolves effective modality from (per-call opts → suggestions → 'text'); image route embeds via `embedQueryMultimodal`, searches `embedding_image`, skips expansion + keyword; 'both' route runs parallel text + image vector searches with weighted RRF; 'auto' literal normalized to undefined; fail-open on misconfig.
+- `src/core/operations.ts`: `cross_modal` param threaded through `query` op.
+- `src/core/backfill-registry.ts`: new `modality` backfill kind with `chunk_source='image_asset'` defensive guard.
+- `src/commands/doctor.ts`: `cross_modal_modality_backfill` check.
+
+#### Phase 2 — image-as-query
+- `src/core/ssrf-validate.ts`: new core helper. `validateAndResolveUrl` does DNS lookup with all records, rejects ANY internal-resolving record. `fetchWithSSRFGuard` re-validates every redirect hop and limits chain depth (default 3). Reusable for any URL-fetching feature.
+- `src/core/search/image-loader.ts`: `loadImageInput` accepts local path, data: URI, or http(s):// URL. Magic-byte sniff for PNG/JPEG/WebP. 10 MB cap (configurable). 5s fetch timeout. Pre-flight Content-Length + post-fetch size guard for lying servers.
+- `src/core/search/by-image.ts`: `searchByImage` always runs image branch; D13 hybrid intersect runs parallel text branch when `query` is provided.
+- `src/core/operations.ts`: new `search_by_image` op (scope: read, NOT localOnly). Remote callers with `image_path` set rejected with permission_denied. Source-id threaded via sourceScopeOpts. Per-param length cap. Pre-flight budget gate + post-call spend record.
+- `src/core/spend-log.ts`: BudgetExceededError + checkBudget + recordSpend + getTodaySpendCents. UTC day-aligned. Local CLI bypasses gate; pre-v0.36 brains fail open.
+- `src/core/migrate.ts` v74: new `mcp_spend_log` table + BTREE indexes.
+
+#### Phase 3 — unified multimodal column
+- `src/core/migrate.ts` v75: `ALTER TABLE content_chunks ADD COLUMN embedding_multimodal vector(1024)`. Column-only — HNSW partial index deferred to post-reindex build per pgvector best practice.
+- `src/schema.sql` + `src/core/pglite-schema.ts`: column added inline so fresh installs land at head.
+- `src/core/types.ts`: `SearchOpts.embeddingColumn` type widened to include `'embedding_multimodal'`.
+- `src/core/postgres-engine.ts` + `src/core/pglite-engine.ts` `searchVector`: route to unified column when opts set. NO modality filter (column carries both text + image).
+- `src/core/search/hybrid.ts`: when `search.unified_multimodal: true`, bypass dual-column branching and run unified routing. Fail-open: zero rows + not strict → fall through to dual-column. Strict mode (`unified_multimodal_only`) blocks fallback.
+- `src/commands/reindex-multimodal.ts`: new `gbrain reindex --multimodal [--limit N] [--dry-run] [--cost-estimate] [--no-embed] [--yes] [--json]`. Writer lock acquisition (6h TTL). Cost prompt + 10s Ctrl-C grace in TTY. `GBRAIN_NO_REEMBED=1` bypass. Checkpoint resume. Auto-flip prompt at coverage=100% completion.
+- `src/cli.ts`: dispatch.
+- `src/commands/doctor.ts`: `unified_multimodal_coverage` check reports per-source coverage when flag on.
+
+#### Commit 4 — LLM intent escalation (opt-in)
+- `src/core/search/llm-intent.ts`: `classifyModalityWithLLM(query, fallback)` via `gateway.chat()` with fixed system prompt. 1s timeout. Fail-open on every error.
+- `src/core/search/hybrid.ts`: escalation branch gated by (no explicit per-call opt) AND (regex returned 'text') AND (config flag on) AND (isAmbiguousModalityQuery true).
+
+#### Tests
+- `test/embed-multimodal-batching.test.ts` (13 cases)
+- `test/ssrf-validate.test.ts` (20 cases)
+- `test/cross-modal-phase1.test.ts` (45 cases)
+- `test/cross-modal-hybrid-integration.test.ts` (7 cases)
+- `test/cross-modal-phase2.test.ts` (15 cases)
+- `test/search-by-image-op.test.ts` (7 cases)
+- `test/unified-multimodal.test.ts` (8 cases)
+- `test/llm-intent-escalation.test.ts` (14 cases)
+- `test/llm-intent-hybrid-integration.test.ts` (6 cases)
+
+#### For contributors
+- D10 reindex-core extraction filed as a follow-up: markdown and multimodal reindex commands diverge enough in their core loop that extracting shared infrastructure (cost prompt, lock, checkpoint) is larger than this PR can absorb cleanly. Both commands stand alone with the same patterns.
+- The `voyage-multimodal-3` real-API E2E test fails against Voyage's current API because the test fixture is AVIF and Voyage now rejects that format. Fix is a separate one-line fixture swap; failure is pre-existing on master.
+
+Closes #1127 (spec doc preserved at `docs/issues/cross-modal-search.md`).
+
 ## [0.36.5.0] - 2026-05-18
 
 **Your agent picks which secrets to pass to a shell job by name. The worker resolves the values; names land in the row, values don't.**
@@ -112,6 +232,7 @@ Design note on the closed-vs-free-form arc: an early draft of v0.36.5.0 used a c
 4. **If any step fails**, file an issue: https://github.com/garrytan/gbrain/issues with the output of `gbrain doctor` and the contents of `~/.gbrain/upgrade-errors.jsonl` if it exists. This feedback loop is how the wedge incidents get caught.
 
 Credit: this wave exists because @garrytan-agents filed PR #1137 documenting the env-stripping gap. The doc made the underlying problem visible enough to fix in code. Thank you.
+
 ## [0.36.4.0] - 2026-05-18
 
 **Your agent can now drive your brain to 90/100 by itself, on a cron, without you watching.**
@@ -305,6 +426,7 @@ gate, doctor_run_id GIN index, op_checkpoints GC).
   doing so requires async-propagating the 4 sync call sites in
   `src/commands/import.ts` and re-writing 18 tests. Deferred — both
   checkpoint systems coexist for now without conflict.
+
 ## [0.36.3.0] - 2026-05-18
 
 **Search now routes through any embedding column you've populated, not just OpenAI 1536. Voyage and ZeroEntropy columns become first-class search targets in one config flip.**
