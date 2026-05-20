@@ -3151,6 +3151,87 @@ export const MIGRATIONS: Migration[] = [
     `,
   },
   {
+    version: 78,
+    name: 'embedding_multimodal_column',
+    // D20 Phase 3: add the unified-multimodal vector column to content_chunks.
+    //
+    // Column-only migration — the HNSW partial index is built AFTER the first
+    // bulk reindex completes (via `gbrain reindex --multimodal --build-index`
+    // or auto-built at completion). pgvector docs explicitly note that HNSW
+    // build is faster after data load, and per-row index maintenance during
+    // bulk reindex would slow the operation 2-3x.
+    //
+    // Operator class will be vector_cosine_ops to match the existing
+    // embedding_image index for ranking parity.
+    //
+    // The column ships at 1024 dims to match Voyage multimodal-3 output.
+    // Operators wanting a different dim (Cohere multimodal at 1408d, etc.)
+    // need a column rebuild — surfaced by the `multimodal_column_dim_match`
+    // doctor check (D20 model+dim pin).
+    idempotent: true,
+    sql: `
+      ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS embedding_multimodal vector(1024);
+    `,
+    sqlFor: {
+      pglite: `
+        ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS embedding_multimodal vector(1024);
+      `,
+    },
+  },
+  {
+    version: 77,
+    name: 'mcp_spend_log',
+    // D23-#6: per-OAuth-client paid-API spend tracking. search_by_image
+    // (Phase 2 of cross-modal wave) makes paid Voyage calls on behalf of
+    // remote OAuth clients. The existing v0.22.7 limiter caps requests/min
+    // but not spend. A 100-req/min attacker can burn ~$3/hour at Voyage
+    // rates. This table aggregates spend so the daily-budget check can
+    // refuse new calls when a client crosses
+    // search.image_query.daily_budget_usd_per_client (default $5).
+    //
+    // Indexed for the hot read: (client_id, day) lookup, summed.
+    // Row count is bounded by O(clients × days) — tiny.
+    idempotent: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS mcp_spend_log (
+        id SERIAL PRIMARY KEY,
+        client_id TEXT,
+        token_name TEXT,
+        operation TEXT NOT NULL,
+        spend_cents NUMERIC(12, 4) NOT NULL DEFAULT 0,
+        provider TEXT,
+        model TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      -- BTREE on (client_id, created_at) covers the per-day rollup query
+      -- (SELECT SUM ... WHERE client_id = $ AND created_at >= today_start) via
+      -- range scan on created_at. date_trunc in an index expression would
+      -- require IMMUTABLE — TIMESTAMPTZ truncation depends on session timezone.
+      CREATE INDEX IF NOT EXISTS idx_mcp_spend_log_client_time
+        ON mcp_spend_log (client_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_mcp_spend_log_token_time
+        ON mcp_spend_log (token_name, created_at);
+    `,
+    sqlFor: {
+      pglite: `
+        CREATE TABLE IF NOT EXISTS mcp_spend_log (
+          id SERIAL PRIMARY KEY,
+          client_id TEXT,
+          token_name TEXT,
+          operation TEXT NOT NULL,
+          spend_cents NUMERIC(12, 4) NOT NULL DEFAULT 0,
+          provider TEXT,
+          model TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        CREATE INDEX IF NOT EXISTS idx_mcp_spend_log_client_time
+          ON mcp_spend_log (client_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_mcp_spend_log_token_time
+          ON mcp_spend_log (token_name, created_at);
+      `,
+    },
+  },
+  {
     version: 66,
     name: 'embed_stale_partial_index',
     // Renumbered v58→v59→v60→v66 across merge waves:
@@ -3515,8 +3596,98 @@ export const MIGRATIONS: Migration[] = [
   },
   {
     version: 74,
-    name: 'takes_unresolvable_quality_v0_36_1_1',
-    // v0.36.1.1 hotfix — accepts quality='unresolvable' as a 4th valid
+    name: 'eval_candidates_embedding_column',
+    // v0.36.3.0 (D16 / CDX-10): persist the resolved embedding column on
+    // each eval_candidates row so replay against a captured query uses
+    // the column that was active at capture time — not whichever column
+    // is current local default. Without this, switching
+    // `search_embedding_column` between capture and replay produces
+    // false-positive "regressions" that are just column changes.
+    //
+    // Nullable for back-compat: pre-v0.36 rows have NULL; replay treats
+    // NULL as "use current default" so existing captures keep working
+    // exactly as before the migration.
+    //
+    // Renumbered v68→v74 during the second master merge: master's
+    // v0.36.1.0 calibration wave claimed v68-v73 first. The ALTER
+    // itself is unchanged; only the slot number moved. The column is
+    // also in PGLITE_SCHEMA_SQL / src/schema.sql so fresh installs get
+    // it natively without running this migration.
+    idempotent: true,
+    sql: `
+      ALTER TABLE eval_candidates
+        ADD COLUMN IF NOT EXISTS embedding_column TEXT;
+    `,
+    // PGLite parity: same ALTER, same IF NOT EXISTS guard makes this a
+    // no-op on subsequent boots.
+    sqlFor: {
+      pglite: `
+        ALTER TABLE eval_candidates
+          ADD COLUMN IF NOT EXISTS embedding_column TEXT;
+      `,
+    },
+  },
+  {
+    version: 75,
+    name: 'op_checkpoints_table',
+    // v0.36+ autonomous-remediation wave (renumbered v67→v75 during master
+    // merge — master's v0.36.1.0 calibration + v0.36.3.0 captured v67-v74).
+    // Shared checkpoint table for long-running ops (embed, extract, lint,
+    // backlinks, reindex, integrity). Pre-fix, each op had its own
+    // file-backed checkpoint (or none), which broke on Postgres multi-worker
+    // hosts and silently fingerprint-collided across param variations
+    // (extract links vs extract timeline shared one file). DB-backed primary;
+    // PGLite engine falls back to file-backed at
+    // ~/.gbrain/checkpoints/<op>-<fingerprint>.json because it's single-host
+    // by construction.
+    //
+    // Fingerprint = sha8 of canonical-JSON of relevant params per op
+    // (chunker_version + embedding_model for embed, mode for extract, etc.).
+    // completed_keys are op-defined strings: chunk ids for embed, file paths
+    // for extract/lint/backlinks/reindex, page slugs for integrity.
+    //
+    // GC: cycle's purge phase drops rows older than 7 days.
+    idempotent: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS op_checkpoints (
+        op TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        completed_keys JSONB NOT NULL DEFAULT '[]'::jsonb,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (op, fingerprint)
+      );
+      CREATE INDEX IF NOT EXISTS op_checkpoints_updated_at_idx
+        ON op_checkpoints (updated_at);
+    `,
+  },
+  {
+    version: 76,
+    name: 'minion_jobs_doctor_run_id_index',
+    // v0.36+ autonomous-remediation wave (renumbered v68→v76 during master
+    // merge). Partial GIN on minion_jobs.data for `data ? 'doctor_run_id'`.
+    // Lets `gbrain doctor --remediate` runs be queried by run id for audit
+    // trail without sequential-scanning months of cron history. Partial so
+    // only doctor-submitted jobs are indexed; ordinary cron submissions
+    // don't bloat the index.
+    //
+    // PGLite skips via empty sqlFor — JSONB GIN partial indexes aren't
+    // supported the same way; audit query falls through to sequential
+    // scan, which is fine for PGLite's single-host scope.
+    idempotent: true,
+    sql: '',
+    sqlFor: {
+      postgres: `
+        CREATE INDEX IF NOT EXISTS minion_jobs_doctor_run_id_idx
+          ON minion_jobs USING GIN (data jsonb_path_ops)
+          WHERE data ? 'doctor_run_id';
+      `,
+      pglite: '',
+    },
+  },
+  {
+    version: 79,
+    name: 'takes_unresolvable_quality_v0_37_0_1',
+    // v0.37.0.1 hotfix — accepts quality='unresolvable' as a 4th valid
     // resolution state. Unblocks production grading scripts that write the
     // 4th verdict type (the judge in grade-takes returns
     // correct|incorrect|partial|unresolvable, but v37's CHECKs only allowed
@@ -3537,6 +3708,9 @@ export const MIGRATIONS: Migration[] = [
     // ALTER TABLE ADD CONSTRAINT acquires AccessExclusiveLock while it
     // validates existing rows. On a 36K-row takes table this is sub-second;
     // larger tables would want NOT VALID + VALIDATE CONSTRAINT, deferred.
+    //
+    // Renumbered v74→v79 during master merge: master's v0.36.1.0
+    // calibration + v0.36.3.0 + autonomous-remediation wave claimed v68-v78.
     idempotent: true,
     sql: `
       -- (b) Drop both possible names for the column-level CHECK:

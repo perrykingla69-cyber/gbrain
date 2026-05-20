@@ -1611,30 +1611,32 @@ describe('resolveSessionTimeouts — env var overrides', () => {
   });
 });
 
-// ─── v0.36.1.1 — v74 takes_unresolvable_quality_v0_36_1_1 ──────────────────
+// ─── v0.37.0.1 — v79 takes_unresolvable_quality_v0_37_0_1 ──────────────────
 //
 // Hotfix that unblocks the production grading script. Widens BOTH:
 //   (a) the table-level takes_resolution_consistency CHECK to accept
 //       quality='unresolvable' AND outcome=NULL
 //   (b) the column-level CHECK on resolved_quality to allow 'unresolvable'
 // Structural assertions only — round-trip behavior is covered by E2E.
+// Renumbered v74→v79 during master merge (autonomous-remediation wave
+// claimed v68-v78 before this hotfix landed).
 
-describe('migrate v74 — takes_unresolvable_quality_v0_36_1_1', () => {
-  const v74 = MIGRATIONS.find(m => m.version === 74);
+describe('migrate v79 — takes_unresolvable_quality_v0_37_0_1', () => {
+  const v79 = MIGRATIONS.find(m => m.version === 79);
 
-  test('v74 entry exists with the documented name', () => {
-    expect(v74).toBeDefined();
-    expect(v74!.name).toBe('takes_unresolvable_quality_v0_36_1_1');
+  test('v79 entry exists with the documented name', () => {
+    expect(v79).toBeDefined();
+    expect(v79!.name).toBe('takes_unresolvable_quality_v0_37_0_1');
   });
 
-  test('v74 is marked idempotent so re-runs are safe', () => {
-    expect(v74!.idempotent).toBe(true);
+  test('v79 is marked idempotent so re-runs are safe', () => {
+    expect(v79!.idempotent).toBe(true);
   });
 
-  test("v74 widens the column-level CHECK to include 'unresolvable'", () => {
-    const sql = (v74!.sql ?? '').toLowerCase();
+  test("v79 widens the column-level CHECK to include 'unresolvable'", () => {
+    const sql = (v79!.sql ?? '').toLowerCase();
     // Drops both possible names (auto-generated + explicitly-named) so
-    // pre-v74 brains converge regardless of which CHECK shape they had.
+    // pre-v79 brains converge regardless of which CHECK shape they had.
     expect(sql).toContain('drop constraint if exists takes_resolved_quality_check');
     expect(sql).toContain('drop constraint if exists takes_resolved_quality_values');
     // The new CHECK enumerates all four valid quality states.
@@ -1645,8 +1647,8 @@ describe('migrate v74 — takes_unresolvable_quality_v0_36_1_1', () => {
     expect(sql).toMatch(/'unresolvable'/);
   });
 
-  test('v74 widens the table-level takes_resolution_consistency CHECK', () => {
-    const sql = v74!.sql ?? '';
+  test('v79 widens the table-level takes_resolution_consistency CHECK', () => {
+    const sql = v79!.sql ?? '';
     expect(sql).toContain('DROP CONSTRAINT IF EXISTS takes_resolution_consistency');
     expect(sql).toContain('ADD CONSTRAINT takes_resolution_consistency CHECK');
     // The new (quality, outcome) row for unresolvable joins partial as
@@ -1654,8 +1656,8 @@ describe('migrate v74 — takes_unresolvable_quality_v0_36_1_1', () => {
     expect(sql).toMatch(/resolved_quality\s*=\s*'unresolvable'\s+AND\s+resolved_outcome\s+IS\s+NULL/i);
   });
 
-  test('v74 keeps the existing four (quality, outcome) pairs intact', () => {
-    const sql = v74!.sql ?? '';
+  test('v79 keeps the existing four (quality, outcome) pairs intact', () => {
+    const sql = v79!.sql ?? '';
     // Regression: shouldn't accidentally drop pre-existing legal states.
     expect(sql).toMatch(/resolved_quality\s+IS\s+NULL\s+AND\s+resolved_outcome\s+IS\s+NULL/i);
     expect(sql).toMatch(/resolved_quality\s*=\s*'correct'\s+AND\s+resolved_outcome\s*=\s*true/i);
@@ -1665,11 +1667,11 @@ describe('migrate v74 — takes_unresolvable_quality_v0_36_1_1', () => {
 });
 
 // E2E round-trip — runs against PGLite (no DATABASE_URL needed). Spins up a
-// fresh in-memory brain, applies all migrations through v74, then exercises
-// the regression checklist: R1 unresolvable persists, R2 pre-v74 (NULL,NULL)
+// fresh in-memory brain, applies all migrations through v79, then exercises
+// the regression checklist: R1 unresolvable persists, R2 pre-v79 (NULL,NULL)
 // rows survive, R3+R4 contradictory pairs still rejected, R5 the four legal
 // shapes all round-trip.
-describe('migrate v74 — CHECK widening end-to-end on PGLite', () => {
+describe('migrate v79 — CHECK widening end-to-end on PGLite', () => {
   let engine: PGLiteEngine;
 
   beforeAll(async () => {
@@ -1684,14 +1686,14 @@ describe('migrate v74 — CHECK widening end-to-end on PGLite', () => {
 
   async function insertTake(rowNum: number): Promise<number> {
     // Need a page row to satisfy the FK before we can write a take.
-    const slug = `wiki/people/v74-test-${rowNum}-${Math.random().toString(36).slice(2, 8)}`;
+    const slug = `wiki/people/v79-test-${rowNum}-${Math.random().toString(36).slice(2, 8)}`;
     const page = await engine.putPage(slug, {
       type: 'person',
-      title: `v74 test row ${rowNum}`,
+      title: `v79 test row ${rowNum}`,
       compiled_truth: '',
       timeline: '',
       frontmatter: {},
-      content_hash: `v74-${rowNum}-${Math.random()}`,
+      content_hash: `v79-${rowNum}-${Math.random()}`,
     });
     await engine.executeRaw(
       `INSERT INTO takes (page_id, row_num, claim, kind, holder, weight, active)
@@ -1723,7 +1725,7 @@ describe('migrate v74 — CHECK widening end-to-end on PGLite', () => {
     }
   }
 
-  test('R1: writing quality=unresolvable + outcome=NULL succeeds post-v74', async () => {
+  test('R1: writing quality=unresolvable + outcome=NULL succeeds post-v79', async () => {
     const pageId = await insertTake(101);
     const result = await tryResolve(pageId, 101, 'unresolvable', null);
     expect(result.ok).toBe(true);
@@ -1736,8 +1738,8 @@ describe('migrate v74 — CHECK widening end-to-end on PGLite', () => {
     expect(row.resolved_outcome).toBeNull();
   });
 
-  test('R2: pre-v74 row with quality=NULL AND outcome=NULL survives widened CHECK', async () => {
-    // After v74 ran on initSchema, inserting an unresolved take must still
+  test('R2: pre-v79 row with quality=NULL AND outcome=NULL survives widened CHECK', async () => {
+    // After v79 ran on initSchema, inserting an unresolved take must still
     // succeed — the (NULL, NULL) case is still legal.
     const pageId = await insertTake(102);
     const row = (await engine.executeRaw<{ resolved_quality: string | null; resolved_outcome: boolean | null }>(
@@ -1789,7 +1791,7 @@ describe('migrate v74 — CHECK widening end-to-end on PGLite', () => {
     // unresolvable_rate is computed against the 4-state denominator.
     expect(scorecard.unresolvable_rate).not.toBeNull();
     expect(scorecard.unresolvable_rate!).toBeGreaterThan(0);
-    // The legacy fields keep their pre-v74 meaning.
+    // The legacy fields keep their pre-v79 meaning.
     expect(typeof scorecard.accuracy).not.toBe('undefined');
     expect(typeof scorecard.partial_rate).not.toBe('undefined');
   });

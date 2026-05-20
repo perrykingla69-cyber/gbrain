@@ -3,17 +3,19 @@
 > **Historical context.** This is the source spec absorbed from PR #1191 into
 > two waves of implementation:
 >
-> - **v0.36.1.1 hotfix** (this release): widens the `takes_resolution_consistency`
+> - **v0.37.0.1 hotfix** (this release): widens the `takes_resolution_consistency`
 >   CHECK constraint to accept `quality='unresolvable'` as a 4th valid state.
 >   Unblocks the production grading script. Adds `unresolvable_count` +
 >   `unresolvable_rate` to `TakesScorecard` as sibling fields (preserves
->   v0.36.1.0 historical comparison semantics).
-> - **v0.36.2.0 wave** (forthcoming): falsifiability + category extraction at
+>   v0.36.1.0 historical comparison semantics). Migration renumbered v74→v79
+>   during master merge — v0.37.0.0's autonomous-remediation wave claimed
+>   v68-v78 in parallel.
+> - **Follow-up minor** (forthcoming): falsifiability + category extraction at
 >   `propose_takes`, SQL-side grade gate, per-category calibration scorecards,
 >   pg_trgm-based proposal dedup. Wave-blocking on cat15 F1 re-validation
 >   against the v0.36.1.0 fixtures.
 >
-> Preserved here per the v0.36.1.1 plan's PR #1191 close protocol so the
+> Preserved here per the hotfix plan's PR #1191 close protocol so the
 > production context (96K-page brain, 6.8% falsifiability rate, category
 > breakdown) doesn't get lost in the CHANGELOG → release-notes condensation.
 
