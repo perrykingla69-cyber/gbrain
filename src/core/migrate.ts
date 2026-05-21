@@ -3813,13 +3813,17 @@ export const MIGRATIONS: Migration[] = [
       END$$;
     `,
     sqlFor: {
-      // PGLite doesn't support DO blocks. Use a simpler conditional via
-      // information_schema with a separate idempotent guard.
+      // PGLite doesn't support DO blocks; pglite-schema.ts CREATE TABLE
+      // already includes the constraint on fresh installs, so this migration
+      // is a no-op when the constraint exists. DROP-IF-EXISTS + ADD pattern
+      // is idempotent and rebuilds the UNIQUE index (instant on small tables).
       pglite: `
         ALTER TABLE subagent_tool_executions
           ADD COLUMN IF NOT EXISTS ordinal INTEGER;
         ALTER TABLE subagent_tool_executions
           ADD COLUMN IF NOT EXISTS gbrain_tool_use_id UUID;
+        ALTER TABLE subagent_tool_executions
+          DROP CONSTRAINT IF EXISTS subagent_tool_executions_stable_id;
         ALTER TABLE subagent_tool_executions
           ADD CONSTRAINT subagent_tool_executions_stable_id
           UNIQUE (job_id, message_idx, ordinal);
