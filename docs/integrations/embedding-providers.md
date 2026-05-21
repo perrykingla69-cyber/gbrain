@@ -37,6 +37,7 @@ gbrain init --pglite --model voyage            # use a non-default provider
 
 - **Cost-sensitive, English-only**: Ollama (free, local) or Voyage (paid, best quality per dollar).
 - **Quality-first**: Voyage `voyage-4-large` (1024-2048 dims, ~3-4× more dense tokens than OpenAI tiktoken).
+- **Code-heavy brain (gstack per-worktree, source repos)**: Voyage `voyage-code-3` (1024 default; supports 256/512/1024/2048). Tuned on programming languages. Voyage publishes head-to-head numbers showing it outperforms their general flagships on code retrieval ([voyageai.com/blog](https://voyageai.com/blog)). For gstack's per-worktree pglite-backed code brain, this is the right default — see Topology 3 in `docs/architecture/topologies.md`.
 - **Reranking pair**: Voyage (their reranker `rerank-2.5` pairs cleanly with Voyage embeddings).
 - **One key for many hosted models**: OpenRouter. Set `OPENROUTER_API_KEY` and use `openrouter:<provider>/<model>` for chat against GPT-5.2, Claude 4.x, Gemini 3, DeepSeek, and dozens more without juggling per-provider keys. Embedding catalog includes OpenAI, Google, Qwen, BGE-M3.
 - **Enterprise compliance**: Azure OpenAI (data residency + private endpoints) or self-hosted via llama-server / Ollama.
@@ -55,6 +56,15 @@ Default. Set `OPENAI_API_KEY`. Models: `text-embedding-3-large` (3072 max, 1536 
 Best-in-class quality on the Voyage 4 family (Jan 2026 release). Set `VOYAGE_API_KEY`. Models: `voyage-4-large`, `voyage-4`, `voyage-4-lite`, `voyage-4-nano`, `voyage-3.5`, `voyage-code-3` (code-tuned), `voyage-finance-2`, `voyage-law-2`, `voyage-multimodal-3` (text + image).
 
 Voyage 4 family shares an embedding space across all variants, so you can index with `voyage-4-large` and query with `voyage-4-lite` without reindexing. Dims: 256, 512, 1024, 2048. **2048 exceeds pgvector's HNSW cap of 2000** — those brains fall back to exact vector scans (still correct, just slower).
+
+**For brains that index source code** (gstack's per-worktree pglite-backed code brain — see Topology 3 in `docs/architecture/topologies.md`), prefer `voyage-code-3` over `voyage-4-large`. Voyage tunes it on programming languages and publishes head-to-head numbers vs their general flagships on code retrieval. Configure with:
+
+```bash
+gbrain config set embedding_model voyage:voyage-code-3
+gbrain config set embedding_dimensions 1024
+```
+
+`gbrain reindex --code` will print a recommendation when run against a brain whose configured embedding model isn't code-tuned; suppress with `GBRAIN_NO_CODE_MODEL_NUDGE=1` if you've intentionally chosen another model (single-vendor procurement, compliance, etc.).
 
 ### Google Gemini
 

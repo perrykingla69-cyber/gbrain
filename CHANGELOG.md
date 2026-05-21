@@ -2,6 +2,53 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.37.8.0] - 2026-05-20
+
+**For agents indexing source code with gbrain, the right embedding model is now obvious — and the brain tells you so out loud.**
+
+If you point a gbrain instance at a repo full of source code (the gstack per-worktree code-brain pattern) and you embed with OpenAI's text-embedding-3-large, you're leaving real retrieval quality on the table. Voyage publishes voyage-code-3, a code-tuned embedding model with head-to-head numbers above their general flagships on code retrieval. The model was already registered in gbrain since pre-v0.33, but nothing in the discovery path said "use this for code." The decision tree in the docs routed to voyage-4-large. The Topology 3 setup section said zero about embedding choice. `gbrain reindex --code` happily embedded with whatever you had configured. The recommendation was hiding in plain sight.
+
+This release closes the discovery gap on four surfaces. The embedding-providers doc grows a "Code-heavy brain" branch in the decision tree. Topology 3 in the architecture doc gets a "Recommended embedding model" subsection with a paste-ready `gbrain init --pglite --embedding-model voyage:voyage-code-3 --embedding-dimensions 1024`. The setup skill points at it. And `gbrain reindex --code` itself prints a short stderr nudge when the configured embedding model isn't code-tuned, with the exact `gbrain config set` lines you'd run to switch. Opt out per-environment with `GBRAIN_NO_CODE_MODEL_NUDGE=1` if you're on OpenAI for compliance or single-vendor procurement.
+
+Same diff also fixes a smaller bug that would have made the nudge land badly. Before v0.37.8.0, `gbrain reindex --code` printed its cost preview with a hardcoded `text-embedding-3-large` model name, even when you had `voyage:voyage-code-3` configured. The constant was a v0.13-era back-compat shim that nobody noticed had drifted. The preview now reads the gateway-configured model directly, so the line above the new nudge is finally truthful.
+
+### How to use it
+
+For a fresh gstack per-worktree code brain:
+
+```bash
+export GBRAIN_HOME=/path/to/worktree/.conductor/gbrain
+gbrain init --pglite \
+  --embedding-model voyage:voyage-code-3 \
+  --embedding-dimensions 1024
+```
+
+For an already-initialized brain:
+
+```bash
+gbrain config set embedding_model voyage:voyage-code-3
+gbrain config set embedding_dimensions 1024
+gbrain reindex --code --yes
+```
+
+To stay on a non-code-tuned model and silence the nudge:
+
+```bash
+export GBRAIN_NO_CODE_MODEL_NUDGE=1
+```
+
+### Itemized changes
+
+- `src/commands/reindex-code.ts` — new exported `shouldNudgeCodeModel(bareModelName)` pure helper returning a tagged `NudgeDecision` union. Wired into `runReindexCode` (not the CLI wrapper) so dry-run AND execute paths both surface the nudge — codex outside-voice caught that the CLI wrapper's `--dry-run` branch returns before its gate block, which is where the original plan placed the nudge. Allowlist of code-tuned bare model names: `new Set(['voyage-code-3'])` (case-insensitive); the helper takes the bare name that `getEmbeddingModelName()` actually returns (gateway strips the provider prefix) and emits the qualified `voyage:voyage-code-3` for the paste-ready `gbrain config set` line. Three suppression gates: `opts.json`, `opts.noEmbed`, `process.env.GBRAIN_NO_CODE_MODEL_NUDGE === '1'`. Same file: cost-preview model field swapped from the hardcoded `EMBEDDING_MODEL` back-compat shim at `src/core/embedding.ts:126` to `getEmbeddingModelName()` at all five usage sites (was producing a directly-contradictory model name next to the nudge).
+- `docs/integrations/embedding-providers.md` — "Code-heavy brain (gstack per-worktree, source repos)" branch added to the Decision tree; Voyage section gains a dedicated `voyage-code-3` paragraph linking to voyageai.com/blog for head-to-head numbers (vendor claims softened per codex review).
+- `docs/architecture/topologies.md` — Topology 3 gets a "Recommended embedding model" subsection between "How it works" and "CRITICAL: alias-level routing is manual". Uses `gbrain init --embedding-model` one-shot to avoid the `config set` + `init` ordering ambiguity codex caught.
+- `skills/setup/SKILL.md` — Topology 3 option in the deployment-shape picker grows a one-liner pointing at voyage-code-3 + the topology doc for the full setup recipe.
+- `test/ai/voyage-code-3-recipe.test.ts` — new regression pin: voyage-code-3 in the recipe `models[]` list, in `VOYAGE_OUTPUT_DIMENSION_MODELS`, accepted by `supportsVoyageOutputDimension`, and routed through `dimsProviderOptions` on the SDK-supported `dimensions` field (not the wire-key `output_dimension` — that's the v0.33.1.0 bug class).
+- `test/reindex-code-nudge.serial.test.ts` — new test, serial: 6 pure-function cases over `shouldNudgeCodeModel` (text-embedding-3-large fires, text-embedding-3-small fires, voyage-4-large fires, voyage-code-3 doesn't, Voyage-Code-3 case-insensitive doesn't, empty/null/undefined/whitespace doesn't) + 5 CLI integration cases pinning the suppression contract (default fires on stderr not stdout, `--no-embed` suppresses, `--json` suppresses, `GBRAIN_NO_CODE_MODEL_NUDGE=1` suppresses, already-optimal voyage-code-3 no-ops).
+- `test/reindex-code-model-source.serial.test.ts` — new IRON-RULE regression test pinning the cost-preview correctness fix: `runReindexCode({dryRun: true}).model` equals the gateway-configured embedding model name (voyage-code-3, text-embedding-3-small, voyage-4-large round-trip), NOT the legacy hardcoded `'text-embedding-3-large'` constant.
+- `test/reindex-code.test.ts` — updated: now configures the gateway with `openai:text-embedding-3-large` in `beforeAll` (`getEmbeddingModelName()` requires gateway state; the existing model-name assertion at `:80` still passes verbatim) and sets `GBRAIN_NO_CODE_MODEL_NUDGE=1` so test stderr stays clean.
+- `CLAUDE.md` — new Key Files entry for `src/commands/reindex-code.ts`; Voyage recipe entry annotated with the v0.37.8.0 discoverability surfaces.
+
 ## [0.37.7.0] - 2026-05-21
 
 **Your federated brain stops silently writing to the wrong source. Your autopilot stops thrashing when you point it at a second brain. A handful of CLI surfaces that crashed on first call stop crashing.**
@@ -446,6 +493,7 @@ upgrade is purely the binary swap.
    The brain-first detection is regex-based and will hit false-positives on
    skills that NAME but don't CALL the external tools. Declarative opt-out
    (`brain_first: exempt`) is the canonical answer for that class.
+
 ## [0.37.2.0] - 2026-05-19
 
 **Your grading script writes "unresolvable" verdicts now. Before this fix, every single one was rejected at the database layer — 0 of 34 writes landed in a recent production run.**
