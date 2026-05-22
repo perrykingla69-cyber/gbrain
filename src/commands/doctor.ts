@@ -4511,13 +4511,36 @@ export async function runRemediate(
 ): Promise<void> {
   const targetScore = parseIntFlag(args, '--target-score') ?? 90;
   const maxJobs = parseIntFlag(args, '--max-jobs') ?? Infinity;
-  const maxUsd = parseFloatFlag(args, '--max-usd');
+  // A4 amended: --max-cost is an alias for --max-usd. Both spellings are
+  // documented as the cron-safety guard. Either threads through to the
+  // pre-flight estimate refusal AND, via withBudgetTracker, the mid-run
+  // BudgetExhausted hard-throw.
+  const maxUsd = parseFloatFlag(args, '--max-usd') ?? parseFloatFlag(args, '--max-cost');
   const dryRun = args.includes('--dry-run');
   const skipConfirm = args.includes('--yes');
   const jsonOutput = args.includes('--json');
+  // A4 amended: --resume <plan_hash?> loads the checkpoint for the active
+  // (engine,target) and continues from the next step. With no value, the
+  // most recent checkpoint for the active engine is loaded.
+  const resumeFlagIdx = args.indexOf('--resume');
+  const resumeMode = resumeFlagIdx !== -1;
+  const resumeArg = resumeMode ? args[resumeFlagIdx + 1] : undefined;
+  const resumePlanHash = resumeArg && !resumeArg.startsWith('--') ? resumeArg : undefined;
 
   const { computeRecommendations, classifyChecks, maxReachableScore } =
     await import('../core/brain-score-recommendations.ts');
+  const {
+    BudgetTracker,
+    BudgetExhausted,
+  } = await import('../core/budget/budget-tracker.ts');
+  const { withBudgetTracker } = await import('../core/ai/gateway.ts');
+  const {
+    computePlanHash,
+    saveRemediationCheckpoint,
+    loadRemediationCheckpoint,
+    listRemediationCheckpoints,
+    clearRemediationCheckpoint,
+  } = await import('../core/remediation-checkpoint.ts');
 
   const ctx = await loadRecommendationContext(engine);
 
@@ -4545,6 +4568,46 @@ export async function runRemediate(
   if (recs.length === 0) {
     console.log(`Brain at score ${initialHealth.brain_score}/100, target ${targetScore}. Nothing to do.`);
     return;
+  }
+
+  // A4 amended: compute plan_hash off the active recommendation ids so the
+  // checkpoint binds to THIS plan. Resume only fires for matching plans.
+  const planHash = computePlanHash(recs.map((r) => r.id));
+  let completedFromCheckpoint = new Set<string>();
+  if (resumeMode) {
+    const requested = resumePlanHash;
+    let cp = requested ? loadRemediationCheckpoint(requested) : null;
+    if (!cp && !requested) {
+      // No explicit hash: try newest checkpoint that matches the active plan.
+      const recent = listRemediationCheckpoints();
+      for (const e of recent) {
+        const candidate = loadRemediationCheckpoint(e.plan_hash);
+        if (candidate && candidate.plan_hash === planHash) {
+          cp = candidate;
+          break;
+        }
+      }
+    }
+    if (!cp) {
+      console.error(
+        `[remediate --resume] no matching checkpoint found ` +
+          `(plan_hash=${planHash}${requested ? `; requested=${requested}` : ''}). ` +
+          `Run without --resume to start fresh.`,
+      );
+      process.exit(2);
+    }
+    if (cp.plan_hash !== planHash) {
+      console.error(
+        `[remediate --resume] checkpoint plan_hash=${cp.plan_hash} does not match active plan_hash=${planHash}. ` +
+          `The plan has changed (brain state moved). Run without --resume to start fresh.`,
+      );
+      process.exit(2);
+    }
+    completedFromCheckpoint = new Set(cp.completed.map((c) => c.id));
+    console.error(
+      `[remediate --resume] resuming plan_hash=${planHash}: ${completedFromCheckpoint.size} step(s) completed, ` +
+        `${recs.length - completedFromCheckpoint.size} remaining.`,
+    );
   }
 
   const estTotalUsd = recs.reduce((sum, r) => sum + (r.est_usd_cost ?? 0), 0);
@@ -4582,61 +4645,132 @@ export async function runRemediate(
   const { waitForCompletion } = await import('../core/minions/wait-for-completion.ts');
   const queue = new MinionQueue(engine);
 
-  let stepCount = 0;
-  while (recs.length > 0 && stepCount < maxJobs) {
-    const step = recs[0];
-    if (!step) break;
-    stepCount++;
+  // A4 amended: install a BudgetTracker scope around the plan-step loop so
+  // any gateway.chat / embed / rerank inside a Minion handler (synthesize,
+  // patterns, consolidate) auto-enforces the cap. On BudgetExhausted, the
+  // onExhausted callback persists the checkpoint BEFORE the throw propagates;
+  // the catch surfaces the actionable --resume hint.
+  const remediateTracker = new BudgetTracker({
+    label: 'doctor.remediate',
+    maxCostUsd: maxUsd ?? undefined,
+  });
 
-    // D5: if depends_on intersects aborted, skip + cascade
-    if (step.depends_on && step.depends_on.some((d) => abortedIds.has(d))) {
-      submitted.push({ step: stepCount, id: step.id, job_id: null, status: 'skipped_dep_aborted' });
-      abortedIds.add(step.id);
-      recs.shift();
-      continue;
-    }
+  let exhaustionSnapshot: { spent: number; cap: number; reason: string; model_id?: string } | undefined;
+  remediateTracker.onExhausted(() => {
+    // BudgetTracker fires this synchronously from inside reserve()/record()
+    // before the throw bubbles. Persist whatever has been done so far.
+    const cp = {
+      schema_version: 1 as const,
+      plan_hash: planHash,
+      doctor_run_id: doctorRunId,
+      target_score: targetScore,
+      started_at: new Date().toISOString(),
+      completed: submitted
+        .filter((s) => s.status === 'completed')
+        .map((s) => ({ id: s.id, job: '', status: s.status, job_id: s.job_id ?? null })),
+      aborted_at: new Date().toISOString(),
+      abort_reason: 'budget_exhausted' as const,
+      budget_snapshot: exhaustionSnapshot,
+    };
+    saveRemediationCheckpoint(cp);
+  });
 
-    try {
-      const isProtected = !!step.protected;
-      const job = await queue.add(
-        step.job,
-        { ...step.params, doctor_run_id: doctorRunId },
-        {
-          queue: 'default',
-          idempotency_key: step.idempotency_key,
-          max_attempts: 2,
-          maxWaiting: 1,
-        },
-        isProtected ? { allowProtectedSubmit: true } : undefined,
-      );
-      submitted.push({ step: stepCount, id: step.id, job_id: job.id, status: 'submitted' });
+  const runLoop = async (): Promise<void> => {
+    let stepCount = 0;
+    while (recs.length > 0 && stepCount < maxJobs) {
+      const step = recs[0];
+      if (!step) break;
+      stepCount++;
 
-      // Wait for terminal state. PGLite is in-process — short poll.
-      const terminal = await waitForCompletion(queue, job.id, {
-        pollMs: isPGLite ? 250 : 1000,
-        timeoutMs: (step.est_seconds + 60) * 1000,
-      });
-      const lastSub = submitted[submitted.length - 1];
-      if (lastSub) lastSub.status = terminal.status;
+      // Resume: skip steps that the checkpoint already marked completed.
+      if (completedFromCheckpoint.has(step.id)) {
+        submitted.push({ step: stepCount, id: step.id, job_id: null, status: 'completed' });
+        recs.shift();
+        continue;
+      }
 
-      if (terminal.status !== 'completed') {
+      // D5: if depends_on intersects aborted, skip + cascade
+      if (step.depends_on && step.depends_on.some((d) => abortedIds.has(d))) {
+        submitted.push({ step: stepCount, id: step.id, job_id: null, status: 'skipped_dep_aborted' });
+        abortedIds.add(step.id);
+        recs.shift();
+        continue;
+      }
+
+      try {
+        const isProtected = !!step.protected;
+        const job = await queue.add(
+          step.job,
+          { ...step.params, doctor_run_id: doctorRunId },
+          {
+            queue: 'default',
+            idempotency_key: step.idempotency_key,
+            max_attempts: 2,
+            maxWaiting: 1,
+          },
+          isProtected ? { allowProtectedSubmit: true } : undefined,
+        );
+        submitted.push({ step: stepCount, id: step.id, job_id: job.id, status: 'submitted' });
+
+        // Wait for terminal state. PGLite is in-process — short poll.
+        const terminal = await waitForCompletion(queue, job.id, {
+          pollMs: isPGLite ? 250 : 1000,
+          timeoutMs: (step.est_seconds + 60) * 1000,
+        });
+        const lastSub = submitted[submitted.length - 1];
+        if (lastSub) lastSub.status = terminal.status;
+
+        if (terminal.status !== 'completed') {
+          abortedIds.add(step.id);
+        }
+      } catch (e) {
+        if (e instanceof BudgetExhausted) {
+          exhaustionSnapshot = {
+            spent: e.spent,
+            cap: e.cap,
+            reason: e.reason,
+            model_id: e.modelId,
+          };
+          throw e;
+        }
+        submitted.push({
+          step: stepCount, id: step.id, job_id: null,
+          status: `error: ${(e as Error).message.slice(0, 100)}`,
+        });
         abortedIds.add(step.id);
       }
-    } catch (e) {
-      submitted.push({
-        step: stepCount, id: step.id, job_id: null,
-        status: `error: ${(e as Error).message.slice(0, 100)}`,
-      });
-      abortedIds.add(step.id);
-    }
 
-    recs.shift();
-    // D7: scoped recheck — re-compute plan from fresh health snapshot.
-    // The next plan may drop completed steps and re-introduce failed
-    // steps with bumped retry suffix (D1).
-    if (recs.length === 0 || stepCount >= maxJobs) break;
-    const freshHealth = await engine.getHealth();
-    recs = computeRecommendations(freshHealth, ctx).filter((r) => r.status === 'remediable');
+      recs.shift();
+      // D7: scoped recheck — re-compute plan from fresh health snapshot.
+      // The next plan may drop completed steps and re-introduce failed
+      // steps with bumped retry suffix (D1).
+      if (recs.length === 0 || stepCount >= maxJobs) break;
+      const freshHealth = await engine.getHealth();
+      recs = computeRecommendations(freshHealth, ctx).filter((r) => r.status === 'remediable');
+    }
+  };
+
+  let budgetExhaustedAt: InstanceType<typeof BudgetExhausted> | null = null;
+  try {
+    await withBudgetTracker(remediateTracker, runLoop);
+  } catch (err) {
+    if (err instanceof BudgetExhausted) {
+      budgetExhaustedAt = err;
+      console.error(
+        `\n[remediate] BudgetExhausted (${err.reason}): spent $${err.spent.toFixed(4)} > cap $${err.cap.toFixed(2)}.\n` +
+          `Checkpoint saved. Resume with:\n` +
+          `  gbrain doctor --remediate --resume ${planHash}\n`,
+      );
+    } else {
+      throw err;
+    }
+  }
+
+  // Clear checkpoint on a clean run (no budget abort). Failed steps in the
+  // submitted set don't disqualify the cleanup — they re-surface on the
+  // next plan with bumped suffixes.
+  if (!budgetExhaustedAt) {
+    clearRemediationCheckpoint(planHash);
   }
 
   const finalHealth = await engine.getHealth();
@@ -4658,7 +4792,7 @@ export async function runRemediate(
   }
 
   const anyFailed = submitted.some((s) => s.status !== 'completed' && s.status !== 'submitted');
-  if (anyFailed) process.exit(1);
+  if (budgetExhaustedAt || anyFailed) process.exit(1);
 }
 
 /**

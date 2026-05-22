@@ -3992,6 +3992,35 @@ export const MIGRATIONS: Migration[] = [
         ADD COLUMN IF NOT EXISTS budget_usd_per_day NUMERIC(10, 2) NULL;
     `,
   },
+  {
+    version: 86,
+    name: 'page_links_view_alias',
+    // v0.39 — pglite-engine.ts and postgres-engine.ts both query a relation
+    // named `page_links` (LEFT JOIN page_links pl ON pl.to_page_id = p.id —
+    // see pglite-engine.ts:896 / postgres-engine.ts:959). The canonical
+    // table has always been `links`. This migration installs a `page_links`
+    // VIEW that aliases the table so brains initialized before the v0.39
+    // schema bundle pick up the alias on upgrade.
+    //
+    // Fresh installs already get the view via the embedded schema bundle.
+    // This migration is idempotent (CREATE OR REPLACE VIEW) so re-running
+    // is safe on either engine.
+    //
+    // Discovered during the brainstorm-cathedral wave (v0.39.0.0) when the
+    // E2E test had to workaround the missing view to exercise the resume
+    // path. Originally numbered v81; renumbered to v86 during merge with
+    // master's v0.38 cathedrals (provenance / subagent / spend / oauth
+    // binding) which claimed v81-v85.
+    //
+    // Narrow projection (id, from_page_id, to_page_id) so the view does not
+    // depend on columns added in later migrations (link_source,
+    // origin_page_id, resolution_type) — keeps ALTER TABLE DROP COLUMN
+    // and the bootstrap forward-reference probes unblocked on legacy brains.
+    sql: `
+      CREATE OR REPLACE VIEW page_links AS
+        SELECT id, from_page_id, to_page_id FROM links;
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

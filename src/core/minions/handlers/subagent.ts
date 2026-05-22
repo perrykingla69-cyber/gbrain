@@ -395,6 +395,31 @@ export function makeSubagentHandler(deps: SubagentDeps) {
       }
 
       // 1. Acquire rate lease for the outbound call.
+      //
+      // A1 ORDERING (v0.37.x budget cathedral):
+      //
+      //   +----------------------------------+
+      //   | gateway.chat() inside subagent   |
+      //   +-----+----------------------------+
+      //         |
+      //   1. getCurrentBudgetTracker()?.reserve(...)
+      //         |  (runs via the gateway's AsyncLocalStorage scope,
+      //         |   set by the upstream caller of the subagent.
+      //         |   On BudgetExhausted: throw BEFORE we touch the lease.)
+      //         v
+      //   2. acquireLease(...)  <-- the line below
+      //         |  (only attempted if the budget gate passed)
+      //         v
+      //   3. provider HTTP call
+      //         |
+      //         v
+      //   4. tracker.record(actual usage)
+      //
+      // The handler body intentionally does NOT thread `BudgetTracker`
+      // explicitly. Gateway-layer composition (TX5) handles it. The
+      // ordering is load-bearing: a budget throw must NOT consume a
+      // lease slot, because the lease is the rate-limit pacer for the
+      // entire fleet.
       const lease = await acquireLease(engine, rateLeaseKey, ctx.id, maxConcurrent, { ttlMs: leaseTtlMs });
       if (!lease.acquired) {
         // No slots — treat as a renewable error so the worker re-claims
