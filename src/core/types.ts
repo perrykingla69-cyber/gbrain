@@ -123,6 +123,22 @@ export interface Page {
    * Test fixtures building synthetic Page rows must include this field.
    */
   source_id: string;
+
+  // v0.39.3.0 provenance read-path (WARN-8 + CV5). Migration v81 columns
+  // surfaced through getPage / list_pages so `gbrain call get_page | jq
+  // .source_kind` actually returns the value the put_page op wrote. NULL
+  // on historical pages that pre-date v0.38. Three-state read pattern
+  // (undefined: not in projection, null: column NULL, populated: real
+  // value) — matches the v0.26.5 deleted_at convention so SELECTs that
+  // don't project these columns continue to compile.
+  /** Ingestion-channel taxonomy. See PageInput.source_kind for the closed set. */
+  source_kind?: string | null;
+  /** Original URI/path/message-id the ingestion event carried. */
+  source_uri?: string | null;
+  /** Richer label paired with source_kind (often same value; indexable separately). */
+  ingested_via?: string | null;
+  /** Server-stamped first-write audit timestamp; CV12 COALESCE-preserved across edits. */
+  ingested_at?: Date | null;
 }
 
 export type EffectiveDateSource =
@@ -175,6 +191,42 @@ export interface PageInput {
    * NULL on legacy / non-file callers (MCP `put_page`, fixture seeds).
    */
   source_path?: string | null;
+
+  // v0.39.3.0 provenance write-through (WARN-8 + A1 + CV6).
+  // Migration v81 added these 4 nullable columns to `pages`. Until v0.39.3.0,
+  // put_page wrote them into the file's frontmatter (via the write-through
+  // path) but never to the DB columns — `gbrain call get_page | jq .source_kind`
+  // returned null even though the JSON receipt claimed `capture-cli`. These
+  // params close the loop. Trust gate lives at the put_page op layer
+  // (operations.ts): ONLY ctx.remote === false (trusted local callers like
+  // capture CLI, autopilot, dream cycle) may populate these fields. Remote
+  // MCP callers get server-stamped `mcp:put_page` regardless of what they
+  // pass (CV6 fail-closed; closes the spoofing surface where a write-scope
+  // OAuth token could poison the audit trail with arbitrary labels).
+  //
+  // Storage shape: nullable TEXT columns; the engine's putPage SQL uses
+  // COALESCE-preserve UPDATE semantics (CV12) so omitting these fields on
+  // a later put_page (e.g. a routine edit) does NOT erase the original
+  // ingestion's audit trail. First-write wins.
+  /**
+   * Ingestion-channel taxonomy: 'capture-cli' | 'webhook' | 'file-watcher' |
+   * 'inbox-folder' | 'cron-scheduler' | 'put_page' | 'mcp:put_page' |
+   * '<skillpack-kind>'. Server stamps `mcp:put_page` for remote callers.
+   */
+  source_kind?: string | null;
+  /** Original URI/path/message-id the event carried (file path, mail message-id, URL). NULL when unknown. */
+  source_uri?: string | null;
+  /**
+   * Richer label paired with source_kind (often the same value; kept narrow
+   * + indexable separately per migration v81's documented intent).
+   */
+  ingested_via?: string | null;
+  /**
+   * Always server-stamped at put_page time when any provenance is being
+   * written (NEVER client-controlled — keeps the audit timestamp truthful).
+   * NULL on historical rows that pre-date v0.38.
+   */
+  ingested_at?: Date | null;
 }
 
 export interface PageFilters {

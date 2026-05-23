@@ -215,13 +215,26 @@ export async function importFromContent(
      */
     forceRechunk?: boolean;
     /**
-     * v0.39 T1.5: active schema pack for type inference. When set, parseMarkdown
+     * v0.39.0.0 T1.5: active schema pack for type inference. When set, parseMarkdown
      * uses the pack's path_prefixes instead of the hardcoded gbrain-base table.
      * When unset, falls back to pre-v0.39 behavior (parity gate stays green).
      * Callers thread this from `loadActivePack(ctx)` once per command —
      * NEVER per file inside sync (codex perf finding #7).
      */
     activePack?: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string> }> };
+    /**
+     * v0.39.3.0 provenance write-through (WARN-8). When set, threaded to
+     * `tx.putPage` so the page's `source_kind`, `source_uri`,
+     * `ingested_via` DB columns get populated. The trust gate lives at the
+     * `put_page` op layer — by the time importFromContent sees these, the
+     * caller is already trusted (capture CLI sets them; remote MCP callers
+     * had theirs overridden to `mcp:put_page` upstream). `ingested_at` is
+     * NOT a caller-controllable param; the engine's putPage stamps it
+     * server-side via now() when any provenance write fires.
+     */
+    source_kind?: string | null;
+    source_uri?: string | null;
+    ingested_via?: string | null;
   } = {},
 ): Promise<ImportResult> {
   // v0.18.0+ multi-source: when caller is syncing under a non-default source,
@@ -245,14 +258,34 @@ export async function importFromContent(
 
   const parsed = parseMarkdown(content, slug + '.md', { activePack: opts.activePack });
 
-  // Hash includes ALL fields for idempotency (not just compiled_truth + timeline)
+  // v0.39.3.0 CV8 — DB content_hash excludes timestamp-bearing frontmatter
+  // keys so identical body content from `gbrain capture` (which stamps
+  // `captured_at` and `ingested_at` per call) produces a stable hash.
+  // Pre-fix, every capture-cli invocation produced a fresh hash because
+  // the timestamp changed, defeating:
+  //   - the existing.content_hash === hash short-circuit below (every
+  //     capture re-chunked + re-embedded unchanged content — wasted
+  //     embedding spend)
+  //   - the daemon's 24h LRU dedup (separate consumer keyed on same hash)
+  //
+  // We strip ONLY the timestamp keys, not the whole frontmatter object.
+  // Stripping all frontmatter would regress sync: a user adding a tag
+  // would update the frontmatter without changing the body, the hash
+  // would not change, and tag reconciliation would silently no-op
+  // (this function returns early on hash-match).
+  const HASH_EPHEMERAL_FRONTMATTER_KEYS = ['captured_at', 'ingested_at'];
+  const stableFrontmatter: Record<string, unknown> = { ...parsed.frontmatter };
+  for (const k of HASH_EPHEMERAL_FRONTMATTER_KEYS) {
+    delete stableFrontmatter[k];
+  }
+  // Hash includes all meaningful fields for idempotency.
   const hash = createHash('sha256')
     .update(JSON.stringify({
       title: parsed.title,
       type: parsed.type,
       compiled_truth: parsed.compiled_truth,
       timeline: parsed.timeline,
-      frontmatter: parsed.frontmatter,
+      frontmatter: stableFrontmatter,
       tags: parsed.tags.sort(),
     }))
     .digest('hex');
@@ -343,6 +376,14 @@ export async function importFromContent(
       // code can resolve frontmatter-fallback slugs back to their files.
       chunker_version: MARKDOWN_CHUNKER_VERSION,
       source_path: opts.sourcePath ?? null,
+      // v0.39.3.0 provenance write-through (WARN-8). Engine layer applies
+      // COALESCE-preserve UPDATE so omitting these on a later put_page
+      // doesn't erase the original ingestion's audit trail.
+      source_kind: opts.source_kind ?? null,
+      source_uri: opts.source_uri ?? null,
+      ingested_via: opts.ingested_via ?? null,
+      // ingested_at is server-stamped at the engine layer when any
+      // provenance write fires; never client-controlled.
     }, txOpts);
 
     // Tag reconciliation: remove stale, add current

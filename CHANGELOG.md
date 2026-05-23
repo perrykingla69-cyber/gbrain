@@ -55,6 +55,264 @@ Four follow-up TODOs filed (in the plan file, not TODOS.md yet):
 - NEW-2: cycle-phase wrappers for the other 7 phases (sync, extract, embed, orphans, extract_facts, resolve_symbol_edges, recompute_emotional_weight)
 - NEW-3: HTTP-level trust-boundary E2E that proves serve-http.ts honors the localOnly filter at runtime (codex CMT-3 strongest defense)
 - NEW-4: render function extraction from runDoctor (would let doctor-cli-smoke move back into the parallel fast loop)
+## [0.40.0.0] - 2026-05-17
+
+**Voice agent reference lands — Mars + Venus personas, WebRTC-first, copy-into-your-repo not stuck-in-gbrain.**
+**New skillpack paradigm: gbrain ships REFERENCE content the install agent copies into your repo, where YOU own the edits.**
+
+This release lands `agent-voice` — a reference voice agent (Mars + Venus personas, WebRTC-first browser client, optional Twilio adapter) AND a new skillpack-install paradigm. The voice content is ~5,000 LOC of working code that does NOT live in your `~/.gbrain/skills/` managed block. Instead, `gbrain integrations install agent-voice --target <your-repo>` COPIES it into your host agent repo (e.g. `~/git/your-agent-repo/services/voice-agent/`), and from there it's user-owned, mutable, locally extensible. Future updates are diff-and-propose against per-file SHA-256 hashes, not blind overwrite.
+
+This is the first recipe to use `install_kind: copy-into-host-repo`. The legacy `local-managed` install path is unchanged for every other recipe.
+
+### The four numbers that matter
+
+| Metric | Before | After | Δ |
+|---|---|---|---|
+| Voice-agent content in gbrain | 0 LOC (only a narrative recipe) | ~5,000 LOC reference + 3 SKILL.md + tests | +5,000 |
+| Mars/Venus persona prompts shipped | 0 | 2 (scrubbed; PII-impossible by construction) | +2 |
+| Privacy guard files | scripts/check-privacy.sh (broad) | + scripts/check-no-pii-in-agent-voice.sh (agent-voice scope) | +1 |
+| New install paradigm | "ship to ~/.gbrain/skills/" only | "copy into your host repo" available | +1 |
+
+### What `gbrain integrations install agent-voice` does
+
+1. Reads `recipes/agent-voice/install/manifest.json` — src → target file map.
+2. Validates your target repo (must exist, must have `.git`, must NOT be gbrain itself or a parent of it, no existing files at any target path).
+3. Computes SHA-256 of each source file as it copies, writes `<target>/services/voice-agent/.gbrain-source.json` for future `--refresh`.
+4. Appends three resolver rows to your `RESOLVER.md` or `AGENTS.md`: `voice-persona-mars`, `voice-persona-venus`, `voice-post-call`.
+5. Prints next-step instructions: set `OPENAI_API_KEY`, optionally implement your own context-builder against the documented contract, then `bun run start`.
+
+### What ships in the voice agent
+
+- **Mars persona** (`Orus` voice) — dual-mode: SOLO (introspective thought partner) + DEMO (impressive tool-driven showman). Mode detection from conversational signals.
+- **Venus persona** (`Aoede` voice) — sharp executive assistant; 1-3 sentences max; English-only; sub-second turn-taking.
+- **WebRTC-first browser client** at `/call`. Production load installs ZERO test instrumentation. Append `?test=1` for the E2E namespace (`window._gbrainTest`) + Web Audio API tee → MediaRecorder capture of response audio.
+- **Read-only tool router** with an 8-op allow-list (`search`, `query`, `get_page`, `list_pages`, `find_experts`, `get_recent_salience`, `get_recent_transcripts`, `read_article`). Write ops (`put_page`, `submit_job`, `file_upload`, `delete_page`, `shell`) are permanently denylisted — even adding them to a local override CANNOT enable them.
+- **Persona-aware prompt builder** — identity-first composition, Unicode sanitization for OpenAI Realtime API safety (em dashes, smart quotes, arrows → ASCII), live brain-context injection via operator-implemented `buildMarsContext` / `buildVenusContext`.
+- **Upstream-error classifier** for the E2E — soft-fails on HTTP 429/500/503 from OpenAI, hard-fails on plumbing bugs (`_audioSendCount === 0`).
+- **Three skills** with `routing-eval.jsonl` fixtures, ready to drop into your host repo's resolver.
+
+### What ships in gbrain
+
+- `src/commands/integrations.ts` extended with the `install <recipe-id>` subcommand (the discriminated `install_kind` route).
+- `scripts/check-no-pii-in-agent-voice.sh` wired into `bun run verify` — shape regex (phones, emails, SSN, JWT, bearer, credit card) + path patterns + operator-blocklist env var. Catches re-introduction of private names in `recipes/agent-voice/**` or `recipes/agent-voice.md`.
+- `scripts/import-from-upstream.sh` + `scripts/upstream-scrub-table.txt` — deterministic refresh from upstream voice-agent source (env-var-driven; no upstream-repo name in any shipped file).
+- New TypeScript types: `InstallKind`, manifest shape, install records — pinned by `test/integrations-install.test.ts` (11 cases).
+
+### What you ACTUALLY do to take advantage of v0.40.0.0
+
+```bash
+# 1. Upgrade gbrain (whatever your update path is).
+# 2. Run from your host agent repo or any dir:
+gbrain integrations install agent-voice --target $OPENCLAW_WORKSPACE   # or your repo path
+
+# 3. Set OPENAI_API_KEY in your host repo's .env
+echo "OPENAI_API_KEY=sk-..." >> $OPENCLAW_WORKSPACE/.env
+
+# 4. (Optional but recommended) Edit your context-builder
+$EDITOR $OPENCLAW_WORKSPACE/services/voice-agent/code/lib/context-builder.example.mjs
+# Contract: $OPENCLAW_WORKSPACE/services/voice-agent/code/lib/personas/context-builder.contract.md
+
+# 5. Run the host-side tests
+cd $OPENCLAW_WORKSPACE/services/voice-agent && bun install && bun run test
+
+# 6. Start the server
+cd $OPENCLAW_WORKSPACE/services/voice-agent && bun run start
+# → http://localhost:8765/call
+```
+
+### What this means for daily use
+
+The voice agent runs in YOUR repo, on YOUR cadence. When gbrain ships a new agent-voice reference (Mars gets multilingual after the eval lands; a new pipeline option B becomes available; a security patch in the tool router), you pull at YOUR schedule and run `gbrain integrations install agent-voice --target <repo> --refresh`. The refresh diffs your local copy against gbrain's reference and shows per-file disposition: identical, stale, locally-modified. You pick file-by-file. No silent overwrite of your edits.
+
+### Itemized changes
+
+#### Voice agent (new)
+- `recipes/agent-voice.md` registered recipe with `install_kind: copy-into-host-repo` frontmatter, WebRTC-first body, copy-paradigm explainer, install-subcommand invocation, production checklist.
+- `recipes/agent-voice/README.md` — paradigm doc + sibling-directory convention for future copy-into-host-repo recipes.
+- `recipes/agent-voice/code/` (~17 files) — scrubbed `mars.mjs`, `venus.mjs`, `personas.mjs` registry, `tools.mjs` allow-list router, `gbrain-client.mjs` stdio MCP client, `prompt.mjs` persona-aware builder, `server.mjs` minimal HTTP + WebRTC server, `public/call.html` with `?test=1` instrumentation + WebAudio-tee capture, `lib/upstream-classifier.mjs` for E2E failure triage, ported `audio-convert.mjs` / `gatekeeper.mjs` / `sessions.mjs` / `twilio-bridge.mjs` from upstream (PII-clean).
+- `recipes/agent-voice/skills/` — three SKILL.md skills with `routing-eval.jsonl` fixtures (voice-persona-mars, voice-persona-venus, voice-post-call).
+- `recipes/agent-voice/tests/unit/` — five host-side test suites (97 cases) covering persona registry, prompt-shape privacy guards, read-only allow-list, upstream-error classifier.
+- `recipes/agent-voice/install/` — manifest + refresh-algorithm spec + post-install hint for the install agent.
+
+#### Privacy + scrub infrastructure (new)
+- `scripts/check-no-pii-in-agent-voice.sh` — wired into `bun run verify`. Shape + path + env-driven operator blocklist.
+- `scripts/import-from-upstream.sh` + `scripts/upstream-scrub-table.txt` — deterministic refresh from upstream; placeholder-driven (env-var expanded at run time so no private names in checked-in files).
+- `recipes/agent-voice/code/lib/personas/private-name-blocklist.json` — single source of truth for the regex contract (shape categories + path patterns + env-var name); shared by the shell guard and the host-side `.mjs` prompt-shape tests.
+
+#### gbrain runtime (new src/ code)
+- `src/commands/integrations.ts` extended (~+150 LOC) with `install <recipe-id>` subcommand. New types: `InstallKind` discriminated union, `InstallManifest`, `InstalledFileRecord`, `GbrainSourceJson`. Path-traversal hardening mirrors the pattern from `src/core/operations.ts:validateUploadPath`. Refusal cases pinned by 11 test cases.
+- `recipes/twilio-voice-brain.md` (v0.8.1) — left in place; will be marked deprecated in a follow-up PR.
+
+#### Tests
+- `test/integrations-install.test.ts` — 11 gbrain-side cases (happy path, manifest shape, no upstream_repo field, resolver row appending, file modes, refusal cases for missing target, no-git target, gbrain-itself, overwrite, unknown recipe, dry-run).
+- `test/check-no-pii.test.ts` / `test/import-from-upstream.test.ts` — deferred to a fast-follow PR; the shell scripts are smoke-tested in the local dev loop.
+
+#### Also shipped in this PR (wave 2 — closes original deferred list)
+- E2E test suite — `tests/e2e/voice-roundtrip.test.mjs` (server + puppeteer + fake-audio + Whisper-judge; ~$0.10/run; env-gated on `AGENT_VOICE_E2E=1`) and `tests/e2e/voice-full-flow.test.mjs` (openclaw-driven install + roundtrip; ~$1-2/run; env-gated on `AGENT_VOICE_FULL_E2E=1`). Shared `lib/browser-audio.mjs` + `lib/whisper-judge.mjs`. Three-tier assertion (CONNECTION hard, NON-SILENT hard, SEMANTIC soft). Upstream errors soft-fail via the classifier.
+- Claw-test scenario `voice-agent-install/` with `BRIEF.md` + `scenario.json` (labeled BENCHMARK_FRICTION, `blocks_ship: false`) + `expected.json`.
+- LLM-judge persona evals: gateway-routed 3-model harness (Claude + GPT + Gemini) with 4-strategy JSON repair and 2/3-quorum aggregation. Five fixture sets (`mars-solo`, `mars-demo`, `venus`, `persona-routing`, `mars-multilingual`). Synthetic canonical baselines under `tests/evals/baseline-runs/canonical/` (agent-authored; live receipts gitignored).
+- DIY pipeline (Option B) `code/pipeline.mjs`: streaming Deepgram STT + Claude SSE with sentence-boundary TTS dispatch + Cartesia/OpenAI TTS, 20-turn history cap, exponential reconnect, 25s keepalives, four VAD presets, barge-in on `speechStart`. Modular adapters for swapping any stage.
+- `--refresh` mode in `gbrain integrations install`: classifies each file as unchanged-identical / unchanged-stale / locally-modified / source-deleted / host-deleted / new-in-manifest. Default policy preserves operator edits (`keep-mine`); `--auto take-theirs` overwrites; `--dry-run` previews. Transaction journal at `.gbrain-source.refresh.log`. 7 new test cases pin the classification + decisions.
+- Mars multilingual: persona prompt restores cross-lingual rule (Mandarin / Spanish / French / Japanese / Korean default to English but follow the speaker). New eval fixtures at `tests/evals/fixtures/mars-multilingual.jsonl` gate the claim.
+- `recipes/twilio-voice-brain.md`: deprecation banner pointing at `agent-voice.md`; will be removed in v0.41.
+
+#### For contributors
+- New paradigm `install_kind: copy-into-host-repo` is documented in `recipes/agent-voice/README.md`. Future recipes that want this shape follow the sibling-directory convention pinned there.
+- The deterministic import script + scrub table are the canonical refresh-from-upstream mechanism. Update the table; re-run the script; the PII guard fail-closes if anything slipped through.
+## [0.39.3.0] - 2026-05-22
+
+**`gbrain capture` now actually does what you expect: handles files with their own frontmatter cleanly, dedups identical text, rejects binary files, finds itself in `--help`, and tells you when something goes wrong instead of doing nothing.**
+
+A production smoke test against the v0.38.0.0 ingestion cathedral release turned up two real bugs and ten warnings, all in the new capture and ingest paths. The bugs were the kind that you only notice when you're using the feature for real: capturing a markdown file that already had `---` frontmatter at the top would stamp a SECOND frontmatter block above the user's, with `title: '---'` (the file's opening delimiter became the outer title). And POSTing to `/ingest` with no body at all returned a 500 HTML error page instead of a JSON envelope, because of a single TypeScript line that called `Buffer.from(JSON.stringify(undefined))` and crashed before the empty-body guard could fire.
+
+Beyond the bugs: capture wasn't listed in `gbrain --help`, `gbrain capture --help` printed only one generic line because of a missing entry in a set, the dedup hash included the capture timestamp so identical captures never actually deduplicated, binary files were silently captured as mojibake, `--source nonexistent` printed a raw Postgres FK violation, and brainstorm would hang silently on PgBouncer-restricted environments instead of saying "query was canceled."
+
+This release closes all 12 items in one wave with atomic per-finding commits.
+
+### How to upgrade
+
+```bash
+gbrain upgrade
+# All fixes are transparent. No manual migration steps. The new put_page
+# provenance columns (migration v81) shipped in v0.38.0.0 and are
+# already in your brain; this release populates them on every write
+# instead of leaving them null.
+```
+
+### Things you can now do
+
+- **Capture a file that already has frontmatter** without getting a doubled-frontmatter mess. The new merge logic respects your declared `title`, `type`, `captured_at`, `tags`, `description`, and any other key you set; capture only fills in the fields you left blank.
+- **See `capture`, `brainstorm`, and `lsd` listed in `gbrain --help`** under a new BRAIN section. They were implemented but invisible before.
+- **Run `gbrain capture --help`** and get the full flag documentation (the detailed HELP constant has existed for releases — it was just unreachable behind a generic short-circuit). All seven flags documented with the new behavior notes.
+- **`gbrain capture "same text"` twice in a row produces an identical `content_hash`.** The hash is now computed from the normalized body (whitespace + line endings + Unicode form), not the timestamp-bearing frontmatter. The daemon's 24h LRU dedup actually works.
+- **Capture a markdown file with CJK text, emoji, CRLF line endings, or a BOM** without any of those bytes getting mangled. Hash normalization is separate from stored-body preservation: the hash gets aggressive normalization for dedup correctness; the stored content keeps your bytes for round-trip fidelity.
+- **`gbrain capture --file binary.bin`** rejects with a friendly error instead of capturing 256 bytes of garbage as "text." Same protection on `--stdin` — `cat binary.bin | gbrain capture --stdin` also rejects.
+- **`gbrain capture --source dept-x`** uses the canonical 6-tier source resolution chain (flag → env → dotfile → local_path → brain_default → seed_default), matching every other CLI op. Pre-fix, capture silently ignored `GBRAIN_SOURCE` and `.gbrain-source` dotfiles.
+- **`gbrain capture --source nonexistent-source`** now prints `source 'nonexistent-source' is not registered. Register it first: gbrain sources add nonexistent-source --path <path>` instead of the raw `pages_source_id_fk` Postgres error.
+- **`gbrain call get_page <slug> | jq .source_kind`** actually returns the value the write side stored. Migration v81 added the 4 provenance columns; this release populates them on every put_page (with CV6 trust gating that prevents OAuth clients from spoofing arbitrary `source_kind` labels — server stamps `mcp:put_page` for remote callers regardless of what they send).
+- **POST `/ingest` with no body** returns `400 empty_body` JSON instead of a 500 HTML error page.
+- **Admin `/admin/api/register-client`** accepts `{"scope": "read write"}` (singular wire format), `{"scopes": ["read", "write"]}` (array), or `{"scopes": "read write"}` (string) — all three normalize correctly. Pre-fix only one shape worked.
+- **`brainstorm`/`lsd` on a PgBouncer-restricted environment** now print `Error [brainstorm_timeout]: Brainstorm query was canceled by Postgres` with a hint covering the three Postgres cancel sub-causes (statement_timeout, lock_timeout, user-cancel) and a paste-ready workaround. Pre-fix: silent no-output after the 10-second cost-preview wait.
+
+### What you'd see in a concrete example
+
+```
+$ printf -- '---\ntitle: My Pre-Existing Title\ntags: [work, deal]\n---\n\n# Notes from the meeting\n\nbody here\n' > /tmp/m.md
+$ gbrain capture --file /tmp/m.md --json | jq '.slug, .content_hash, .source_kind'
+"inbox/2026-05-22-a1b2c3d4"
+"f7e6d5..."
+"capture-cli"
+
+$ gbrain capture --file /tmp/m.md --json | jq '.slug, .content_hash'
+"inbox/2026-05-22-a1b2c3d4"  ← SAME slug
+"f7e6d5..."                   ← SAME hash (dedup works)
+
+$ gbrain call get_page --slug inbox/2026-05-22-a1b2c3d4 | jq '.title, .source_kind, .ingested_via'
+"My Pre-Existing Title"     ← user title preserved
+"capture-cli"               ← provenance populated in DB
+"capture-cli"
+
+$ gbrain capture --file /tmp/has-null-byte.bin
+gbrain capture: refusing to capture binary content from /tmp/has-null-byte.bin
+  Found null byte at offset 5 (first 8KB scan); text files (including UTF-8
+  CJK/emoji/BOM) never contain NUL bytes.
+
+$ gbrain capture "x" --source nonexistent
+gbrain capture: source 'nonexistent' is not registered. Register it first:
+  gbrain sources add nonexistent --path <path>
+
+List registered sources:
+  gbrain sources list
+
+$ curl -i -X POST localhost:3131/ingest -H "Authorization: Bearer $TOKEN"
+HTTP/1.1 400 Bad Request
+Content-Type: application/json
+{"error":"empty_body","message":"POST /ingest requires a non-empty body"}
+```
+
+### Things to watch
+
+- **`--source` is now rejected on thin-client installs** (gbrain serve --http with remote MCP clients like Claude Desktop, Cursor) with a clear error pointing at server-side `gbrain auth register-client --source <id>`. Server-side OAuth client registration owns source scope; per-call client override would reopen the spoofing surface this release just closed.
+- **Provenance UPDATE uses COALESCE-preserve.** A `put_page` that doesn't pass `source_kind` keeps the existing value (first-write-wins audit trail). A `put_page` that passes new provenance overwrites (explicit re-ingestion). The honest answer for "what was the most recent ingestion source for this page" lives in the DB; routine edits don't erase it.
+- **`source_kind` taxonomy is now closed:** `capture-cli | put_page | mcp:put_page | webhook | file-watcher | inbox-folder | cron-scheduler` per migration v81's documented set. `--source dept-x` maps to the DB source_id (which source row owns this page), NOT to source_kind. The two were conflated pre-fix.
+- **`--type meeting` and `--type idea` for the same content write to the SAME slug** (slug = content hash, so identical text deterministically produces the same slug). A later capture with a different `--type` overwrites the prior page. Documented in `gbrain capture --help` so it's not surprising.
+- **Brainstorm timeout surfacing is diagnostic-only this release.** The hint points at three potential causes (PgBouncer statement_timeout, lock_timeout, user-cancel) and suggests workarounds, but the underlying SQL-shape rewrite of `listPrefixSampledPages` for PgBouncer compatibility is filed as a v0.39 TODO. If you hit this on every brainstorm and the workarounds don't help, file an issue.
+- **A diagnostic stack trace will print ONCE** on first `gbrain capture` per process for the long-standing `[facts:absorb] failed to log gateway_error ... No database connection` warning — subsequent occurrences are silent. This gives the v0.38.4 fix the call site it needs without per-capture noise. If you hit this regularly, the trace is useful to file with an issue.
+
+## To take advantage of v0.39.3.0
+
+`gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about anything:
+
+1. **Run the orchestrator manually:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+2. **No host-agent action needed.** All fixes are in gbrain itself; your agent's skills don't change.
+3. **Verify the outcome:**
+   ```bash
+   # Verify provenance write-through works
+   SLUG=$(gbrain capture "v0.39.3.0 smoke" --json | jq -r .slug)
+   gbrain call get_page --slug "$SLUG" | jq '.source_kind, .ingested_via'
+   # Should print "capture-cli" twice (not null/null)
+
+   # Verify dedup
+   H1=$(gbrain capture "same text" --json | jq -r .content_hash)
+   H2=$(gbrain capture "same text" --json | jq -r .content_hash)
+   [ "$H1" = "$H2" ] && echo "dedup OK" || echo "DEDUP REGRESSION"
+
+   # Verify CLI help
+   gbrain --help | grep -qE '^\s*capture\s' && echo "capture listed OK"
+   gbrain capture --help | grep -c -- '--' # should be >= 7 lines with --flag docs
+
+   gbrain doctor
+   ```
+4. **If any step fails or the numbers look wrong,** please file an issue:
+   https://github.com/garrytan/gbrain/issues with:
+   - output of `gbrain doctor`
+   - which step broke
+   - the v0.38.0.0 smoke-test report at `docs/v0.38-smoke-test-report.md` for context on what was tested
+
+### Itemized changes
+
+- **`src/commands/capture.ts`** — biggest single-file delta in the wave:
+  - **BUG-1 frontmatter merge.** New `mergeCaptureFrontmatter(rawBody, opts)` pure helper uses gray-matter's `matter()` + `matter.stringify()` directly (NOT the lossy `parseMarkdown` from src/core/markdown.ts which strips type/title/tags/slug). User-wins precedence: spread user's declared keys first, then capture's auto-fields (type → CLI flag > userFm > 'note', title → userFm > derived, captured_via → userFm > opts.source > 'capture-cli', captured_at → userFm > now). Single output frontmatter block in all cases.
+  - **CV3 source_kind taxonomy.** Always stamps `source_kind='capture-cli'` regardless of `--source` (which now maps to source_id only).
+  - **CV15 canonical source resolver.** Routes through `resolveSourceWithTier(engine, parsed.source, cwd)` from `src/core/source-resolver.ts` — honors flag → env (`GBRAIN_SOURCE`) → dotfile (`.gbrain-source` walk-up) → local_path → brain_default → seed_default. Matches every other CLI op.
+  - **CV7 thin-client `--source` rejection.** Exits 1 BEFORE network call with clear error pointing at server-side `gbrain auth register-client --source <id>`.
+  - **CV8 + CV9 hash normalization.** New `normalizeForHash(s)` helper (trim + BOM strip + LF + NFKC). Receipt content_hash from normalized rawBody, NOT the assembled fullContent with timestamp.
+  - **CV10 binary file guard.** New `detectBinaryNullByte(buf)` scans first 8KB for NUL byte. Applied to BOTH `--file` (read as Buffer, no encoding) AND `--stdin` (new `readStdinBuffer()`). Rejects with friendly error including byte offset.
+  - **A2 FK error rewrite.** New `maybeRewriteSourceFkError(err, sourceId)` helper applied in BOTH local-engine and thin-client (`callRemoteTool`) catch blocks per T1. Detects Postgres `pages_source_id_fk` violations and rewrites to paste-ready hint.
+- **`src/commands/serve-http.ts`** — `/ingest` BUG-2 fix (null-guard at the top of body coercion + outer try/catch with `!res.headersSent` guard per codex F#16); `/admin/api/register-client` WARN-9 fix (accepts both `scope` and `scopes` request keys; normalizes via `normalizeScopesInput`).
+- **`src/cli.ts`** — `capture` added to `CLI_ONLY_SELF_HELP` set + pre-engine-bind `--help` short-circuit in `handleCliOnly` (mirrors the existing sync + reinit-pglite pattern). New `BRAIN` section in `printHelp` text covering capture / brainstorm / lsd with their key flags.
+- **`src/core/operations.ts`** — `put_page` op accepts 3 new optional params (source_kind, source_uri, ingested_via). CV6 trust gate: when `ctx.remote !== false`, IGNORES client params and server-stamps `mcp:put_page` regardless. Threads provenance through `importFromContent` to engine `putPage`.
+- **`src/core/import-file.ts`** — CV8 part 2: `importFromContent` excludes `captured_at` and `ingested_at` from the DB content_hash (whitelist of "ephemeral" frontmatter keys). Body + non-ephemeral frontmatter changes still trigger re-chunk; capture-cli's per-call timestamp doesn't invalidate the cache.
+- **`src/core/postgres-engine.ts` + `src/core/pglite-engine.ts`** — `putPage` SQL writes the 4 provenance columns with `COALESCE-preserve UPDATE` semantics (CV12: omitting params on a later put_page preserves prior values; first-write-wins audit trail). `getPage` SQL projection includes the 4 columns so the read path surfaces them.
+- **`src/core/utils.ts`** — `rowToPage` maps the 4 new columns to `Page` fields via the three-state conditional spread pattern (matches v0.26.5 deleted_at convention).
+- **`src/core/types.ts`** — `PageInput` AND `Page` gain 4 optional provenance fields with docstring trust-model + read-path notes.
+- **`src/core/scope.ts`** — new exported `normalizeScopesInput(raw: unknown): string` helper validates string / array / missing / empty shapes against the existing `ALLOWED_SCOPES` allowlist. Rejects `['read write']` (space-in-element bug shape codex flagged), empty arrays, non-string elements, unknown scope names.
+- **`src/core/facts/absorb-log.ts`** — WARN-4 + CQ1 + CV13: typed access via `instanceof GBrainError && e.problem === 'No database connection'` (NOT string-match on message). First-occurrence-per-process stack trace info log; subsequent occurrences silent. Other failure classes still warn loudly.
+- **`src/core/brainstorm/orchestrator.ts` + new `src/core/brainstorm/error-classify.ts`** — CV11 + T4: orchestrator-level try/catch at the public `runBrainstorm` entry covers EVERY internal SQL site. Classifies SQLSTATE 57014 (via postgres.js `.code`, alternate `.sqlState`, or message fallback) into `StructuredAgentError` with code='brainstorm_timeout' and hint covering all 3 PG cancel sub-causes. Non-57014 errors rethrow as-is.
+- **`src/commands/brainstorm.ts`** — catches `StructuredAgentError` before main()'s catch-all and prints `Error [<code>]: <message>` + `Hint: <hint>` lines (mirrors `cli.ts:188-191` OperationError block). JSON mode emits the structured envelope.
+
+### Tests
+
+- **`test/capture-build-content.test.ts`** (NEW, 19 cases, 47 assertions) — CQ2 boil-the-lake: 13 specified cases plus CJK title, CRLF line endings, UTF-8 BOM, empty frontmatter, malformed YAML, no-trailing-newline-before-body, user description/tags/slug passthrough, + 3 deriveTitle cases + 2 --type CLI precedence cases + BUG-1 regression guard with the exact reported input shape.
+- **`test/capture-runcapture.test.ts`** (NEW, 26 cases, 30 assertions) — CV10 binary guard (10 cases), CV9 normalization (6 cases), CV8 hash stability (4 cases), A2 FK error rewrite (6 cases).
+- **`test/put-page-provenance.test.ts`** (NEW, 11 cases, 29 assertions) — trusted local caller honored, CV6 spoofing guard (remote + undefined-trust), CV12 COALESCE-preserve UPDATE, T2 subagent namespace regression with provenance params.
+- **`test/scope-normalize.test.ts`** (NEW, 28 cases) — happy paths (12) + rejection cases (14) + determinism (2).
+- **`test/cli-help-discoverability.test.ts`** (NEW, 6 cases) — capture --help reaches detailed HELP, main --help lists all 3 BRAIN commands, regression guard for existing top-level groups.
+- **`test/brainstorm-timeout.test.ts`** (NEW, 14 cases) — `isQueryCanceledError` across driver shapes, `classifyBrainstormError` typed envelope + hint coverage + non-57014 passthrough, source-shape regression guards.
+- **`test/facts-absorb-log.test.ts`** (extended, 4 new cases) — WARN-4 first-occurrence + suppression contract; other failure classes still warn.
+- **`test/import-file.test.ts`** (extended, 4 new cases) — CV8 DB content_hash stability: timestamp differences IDENTICAL hash, body change DIFFERENT hash, tag change DIFFERENT hash (regression guard), ingested_at differences IDENTICAL.
+- **`test/e2e/engine-parity.test.ts`** (extended, 2 new cases) — provenance columns parity + COALESCE-preserve parity across Postgres + PGLite (T3).
+- **`test/e2e/serve-http-ingest-webhook.test.ts`** (extended, 1 new case) — BUG-2: POST with no body returns 400 JSON envelope (not 500 HTML).
+
+### For contributors
+
+- The smoke-test report at `docs/v0.38-smoke-test-report.md` was contributed by `@garrytan-agents` via PR #1299. PR closed as superseded; report ships verbatim with an Editor's Note prepended pointing at this CHANGELOG for the two factual corrections (BUG-2 line location was re-diagnosed; WARN-5 root cause was identified as a missing entry in `CLI_ONLY_SELF_HELP`).
+- The plan-eng-review flow on the v0 plan produced 15 decisions, 9 of them via codex outside-voice. Plan + decision trace at `~/.claude/plans/system-instruction-you-are-working-async-popcorn.md`.
+- Filed v0.39+ TODOs: SQL-shape rewrite of `listPrefixSampledPages` for PgBouncer; magic-byte allowlist for binary content detection; `--source-kind` override flag; facts:absorb root-cause trace; ingest_capture Minion handler architecture migration.
+
 
 ## [0.39.2.0] - 2026-05-22
 
@@ -269,6 +527,7 @@ in your check output. Federated-brain operators will see new
 
    This feedback loop is how the gbrain maintainers find fragile
    upgrade paths.
+
 ## [0.39.0.0] - 2026-05-21
 
 **You can finally cap the cost of `gbrain brainstorm` and `gbrain lsd`, AND if the cap fires mid-run, you can resume right where you left off without losing the ideas you already paid for.**

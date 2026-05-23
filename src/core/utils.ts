@@ -77,6 +77,14 @@ export function rowToPage(row: Record<string, unknown>): Page {
   const salienceTouchedAt = readOptionalDate(row.salience_touched_at);
   const effectiveDateSource = row.effective_date_source as Page['effective_date_source'] | undefined;
   const importFilename = row.import_filename as string | null | undefined;
+  // v0.39.3.0 CV5 — three-state read for provenance columns. Matches the
+  // v0.26.5 deleted_at pattern: undefined when the SELECT projection didn't
+  // include the column (older code paths); null when the column is NULL
+  // (historical pre-v0.38 row); populated when v0.38+ ingestion stamped it.
+  const sourceKind = row.source_kind === undefined ? undefined : (row.source_kind as string | null);
+  const sourceUri = row.source_uri === undefined ? undefined : (row.source_uri as string | null);
+  const ingestedVia = row.ingested_via === undefined ? undefined : (row.ingested_via as string | null);
+  const ingestedAt = readOptionalDate(row.ingested_at);
   return {
     id: row.id as number,
     slug: row.slug as string,
@@ -96,6 +104,12 @@ export function rowToPage(row: Record<string, unknown>): Page {
     ...(effectiveDateSource !== undefined && { effective_date_source: effectiveDateSource }),
     ...(importFilename !== undefined && { import_filename: importFilename }),
     ...(salienceTouchedAt !== undefined && { salience_touched_at: salienceTouchedAt }),
+    // v0.39.3.0 (columns added in migration v81 — WARN-8 + CV5). Three-state
+    // optional read; absent SELECT projections compile unchanged.
+    ...(sourceKind !== undefined && { source_kind: sourceKind }),
+    ...(sourceUri !== undefined && { source_uri: sourceUri }),
+    ...(ingestedVia !== undefined && { ingested_via: ingestedVia }),
+    ...(ingestedAt !== undefined && { ingested_at: ingestedAt }),
     // v0.31.12: propagate source_id so downstream callers (embed, reconcile-links)
     // can thread it through getChunks / upsertChunks without defaulting to 'default'.
     // v0.32.8: Page.source_id is required. Every SELECT feeding rowToPage now
