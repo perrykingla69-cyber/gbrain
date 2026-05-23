@@ -4021,6 +4021,31 @@ export const MIGRATIONS: Migration[] = [
         SELECT id, from_page_id, to_page_id FROM links;
     `,
   },
+  {
+    version: 87,
+    name: 'sources_github_repo_index',
+    // v0.40 Federated Sync v2 (D13): partial expression index on
+    // sources.config->>'github_repo' so the new POST /webhooks/github
+    // handler's source-by-repo lookup uses an index instead of a sequential
+    // scan. Sources is small today (<100 rows in practice) so the impact is
+    // microseconds, but the lookup fires on every webhook event (including
+    // ignored ones) and a team with hundreds of sources would feel it.
+    //
+    // Partial WHERE clause keeps the index small — only rows with a
+    // configured webhook actually take up index entries. Both Postgres and
+    // PGLite support partial expression indexes; no engine-specific shape.
+    // Idempotent (IF NOT EXISTS).
+    //
+    // Plan called this v81 originally; renumbered to v87 because master's
+    // v0.38/v0.39 cathedrals filled v81-v86 first. Bootstrap probes mirror
+    // the v0.22.6.1 pattern (applyForwardReferenceBootstrap) so legacy
+    // brains pick up the index through initSchema() too.
+    sql: `
+      CREATE INDEX IF NOT EXISTS sources_github_repo_idx
+        ON sources ((config->>'github_repo'))
+        WHERE config ? 'github_repo';
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0
