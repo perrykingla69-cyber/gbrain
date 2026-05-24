@@ -26,11 +26,12 @@ describe.if(HAS_KEY)('voyage-multimodal-3 (real API, gated VOYAGE_API_KEY)', () 
   });
 
   test('embeds the tiny PNG fixture into a 1024-dim vector', async () => {
-    // Reuse the Phase 1 fixture (the AVIF is fine for an embed call; Voyage
-    // accepts data URLs of common image types).
-    const buf = readFileSync('test/fixtures/images/tiny.avif');
+    // Use PNG fixture. Voyage's multimodal endpoint rejects AVIF as of
+    // 2026-05; the prior comment ("AVIF is fine") was true at v0.27.x and
+    // regressed silently on the provider side. PNG is universally accepted.
+    const buf = readFileSync('test/fixtures/images/tiny.png');
     const data = buf.toString('base64');
-    const out = await embedMultimodal([{ kind: 'image_base64', data, mime: 'image/avif' }]);
+    const out = await embedMultimodal([{ kind: 'image_base64', data, mime: 'image/png' }]);
     expect(out.length).toBe(1);
     expect(out[0]).toBeInstanceOf(Float32Array);
     expect(out[0].length).toBe(1024);
