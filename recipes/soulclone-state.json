@@ -1,0 +1,5 @@
+{
+  "name": "soulclone-project-state",
+  "type": "memory",
+  "content": "SoulClone v0.4 - Estado completo del proyecto. Stack: FastAPI+Next.js+PostgreSQL. Stripe y MP REAL. 4 bots Telegram. 6 agentes IA. Dashboard con clon regional mexicano."
+}
